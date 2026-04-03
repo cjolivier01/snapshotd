@@ -23,7 +23,9 @@ void WriteAll(int fd, const void* buffer, std::size_t size) {
   const char* cursor = static_cast<const char*>(buffer);
   std::size_t remaining = size;
   while (remaining > 0) {
-    const ssize_t written = write(fd, cursor, remaining);
+    // Use MSG_NOSIGNAL so a disconnected peer turns into EPIPE instead of
+    // terminating the whole daemon with SIGPIPE.
+    const ssize_t written = send(fd, cursor, remaining, MSG_NOSIGNAL);
     if (written < 0) {
       if (errno == EINTR) {
         continue;
@@ -146,6 +148,9 @@ void SendMessage(int fd, const Message& message) {
   // Prefix the payload so the receiver can safely read one whole message from a
   // stream socket without guessing message boundaries.
   const std::string payload = EncodeMessage(message);
+  if (payload.size() > kMaxControlMessageBytes) {
+    throw std::runtime_error("control message exceeds maximum payload size");
+  }
   const std::uint32_t size = static_cast<std::uint32_t>(payload.size());
   WriteAll(fd, &size, sizeof(size));
   if (!payload.empty()) {
@@ -156,6 +161,9 @@ void SendMessage(int fd, const Message& message) {
 Message ReceiveMessage(int fd) {
   std::uint32_t size = 0;
   ReadAll(fd, &size, sizeof(size));
+  if (size > kMaxControlMessageBytes) {
+    throw std::runtime_error("control message exceeds maximum payload size");
+  }
   std::string payload(size, '\0');
   if (size > 0) {
     ReadAll(fd, payload.data(), payload.size());

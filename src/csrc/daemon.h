@@ -25,6 +25,8 @@ struct DaemonConfig {
   std::string criu_bin;
   /** @brief Absolute path to the helper binary used for pid-namespace dump flows. */
   std::string criu_ns_bin;
+  /** @brief Upper bound for one worker invocation before the daemon cancels it. */
+  int worker_timeout_seconds = 600;
   /** @brief Optional file touched once the daemon is listening, used by tests. */
   std::string ready_file;
 };

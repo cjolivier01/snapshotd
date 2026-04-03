@@ -1,5 +1,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <filesystem>
@@ -77,6 +78,57 @@ void TestValidateAllowedFieldsRejectsUnknownField() {
         snapshotd::ValidateAllowedFields(request, {"job_id", "checkpoint_id"});
       },
       "unknown request field");
+}
+
+void TestReceiveMessageRejectsOversizedPayload() {
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+  const std::uint32_t size =
+      static_cast<std::uint32_t>(snapshotd::kMaxControlMessageBytes + 1);
+  if (write(fds[0], &size, sizeof(size)) != static_cast<ssize_t>(sizeof(size))) {
+    throw std::runtime_error("failed to write oversized header");
+  }
+  ExpectThrows(
+      [&]() {
+        (void)snapshotd::ReceiveMessage(fds[1]);
+      },
+      "oversized control message");
+  close(fds[0]);
+  close(fds[1]);
+}
+
+void TestSendMessageClosedPeerThrowsInsteadOfSignaling() {
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+  close(fds[1]);
+
+  const pid_t child = fork();
+  if (child < 0) {
+    throw std::runtime_error("fork failed");
+  }
+  if (child == 0) {
+    try {
+      snapshotd::Message message;
+      message.command = "status";
+      message.AddField("job_id", "job-123");
+      snapshotd::SendMessage(fds[0], message);
+      _exit(1);
+    } catch (...) {
+      _exit(0);
+    }
+  }
+
+  close(fds[0]);
+  int status = 0;
+  if (waitpid(child, &status, 0) < 0) {
+    throw std::runtime_error("waitpid failed");
+  }
+  Expect(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+         "SendMessage should throw on a closed peer instead of dying from SIGPIPE");
 }
 
 void TestStoreSaveLoadAndAuthorization() {
@@ -163,6 +215,8 @@ int main() {
   try {
     TestProtocolRoundTrip();
     TestValidateAllowedFieldsRejectsUnknownField();
+    TestReceiveMessageRejectsOversizedPayload();
+    TestSendMessageClosedPeerThrowsInsteadOfSignaling();
     TestStoreSaveLoadAndAuthorization();
     TestWriteTextFilePreservesPrivateParentPermissions();
     TestSafeIdValidation();

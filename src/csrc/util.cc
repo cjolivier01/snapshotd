@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/xattr.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
@@ -27,6 +29,21 @@ namespace snapshotd {
 namespace fs = std::filesystem;
 
 namespace {
+
+struct ProcessStatusFields {
+  std::array<uid_t, 4> uids {};
+  std::array<gid_t, 4> gids {};
+  std::string cap_inh;
+  std::string cap_prm;
+  std::string cap_eff;
+  std::string cap_amb;
+  bool have_uids = false;
+  bool have_gids = false;
+  bool have_cap_inh = false;
+  bool have_cap_prm = false;
+  bool have_cap_eff = false;
+  bool have_cap_amb = false;
+};
 
 void EnsureDirImpl(const fs::path& path, mode_t mode, bool chmod_existing) {
   if (path.empty()) {
@@ -78,6 +95,109 @@ void WriteAll(int fd, const std::string& text) {
     cursor += written;
     remaining -= static_cast<std::size_t>(written);
   }
+}
+
+bool ParseFourIds(const std::string& payload, std::array<unsigned long long, 4>* values) {
+  std::istringstream input(payload);
+  for (std::size_t index = 0; index < values->size(); ++index) {
+    if (!(input >> (*values)[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+ProcessStatusFields ReadProcessStatusFields(pid_t pid) {
+  const fs::path status_path = fs::path("/proc") / PidToString(pid) / "status";
+  std::istringstream lines(ReadTextFile(status_path));
+  ProcessStatusFields fields;
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (line.rfind("Uid:", 0) == 0) {
+      std::array<unsigned long long, 4> values {};
+      if (!ParseFourIds(line.substr(4), &values)) {
+        throw std::runtime_error("failed to parse Uid line from " + status_path.string());
+      }
+      for (std::size_t index = 0; index < values.size(); ++index) {
+        fields.uids[index] = static_cast<uid_t>(values[index]);
+      }
+      fields.have_uids = true;
+      continue;
+    }
+    if (line.rfind("Gid:", 0) == 0) {
+      std::array<unsigned long long, 4> values {};
+      if (!ParseFourIds(line.substr(4), &values)) {
+        throw std::runtime_error("failed to parse Gid line from " + status_path.string());
+      }
+      for (std::size_t index = 0; index < values.size(); ++index) {
+        fields.gids[index] = static_cast<gid_t>(values[index]);
+      }
+      fields.have_gids = true;
+      continue;
+    }
+    if (line.rfind("CapInh:", 0) == 0) {
+      fields.cap_inh = line.substr(7);
+      fields.have_cap_inh = true;
+      continue;
+    }
+    if (line.rfind("CapPrm:", 0) == 0) {
+      fields.cap_prm = line.substr(7);
+      fields.have_cap_prm = true;
+      continue;
+    }
+    if (line.rfind("CapEff:", 0) == 0) {
+      fields.cap_eff = line.substr(7);
+      fields.have_cap_eff = true;
+      continue;
+    }
+    if (line.rfind("CapAmb:", 0) == 0) {
+      fields.cap_amb = line.substr(7);
+      fields.have_cap_amb = true;
+      continue;
+    }
+  }
+
+  if (!fields.have_uids || !fields.have_gids || !fields.have_cap_inh ||
+      !fields.have_cap_prm || !fields.have_cap_eff || !fields.have_cap_amb) {
+    throw std::runtime_error("failed to parse process status fields from " + status_path.string());
+  }
+  return fields;
+}
+
+bool IsZeroCapabilityMask(const std::string& value) {
+  bool saw_hex_digit = false;
+  for (char current : value) {
+    if (std::isspace(static_cast<unsigned char>(current))) {
+      continue;
+    }
+    saw_hex_digit = true;
+    if (current != '0') {
+      return false;
+    }
+  }
+  return saw_hex_digit;
+}
+
+bool MatchesExpectedUidTuple(
+    const std::array<uid_t, 4>& values,
+    uid_t expected_uid) {
+  for (uid_t current : values) {
+    if (current != expected_uid) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool MatchesExpectedGidTuple(
+    const std::array<gid_t, 4>& values,
+    gid_t expected_gid) {
+  for (gid_t current : values) {
+    if (current != expected_gid) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -351,21 +471,11 @@ std::string ReadProcessStartTimeTicks(pid_t pid) {
 }
 
 uid_t ReadProcessRealUid(pid_t pid) {
-  const fs::path status_path = fs::path("/proc") / PidToString(pid) / "status";
-  std::istringstream lines(ReadTextFile(status_path));
-  std::string line;
-  while (std::getline(lines, line)) {
-    if (line.rfind("Uid:", 0) != 0) {
-      continue;
-    }
-    std::istringstream fields(line.substr(4));
-    uid_t uid = 0;
-    if (!(fields >> uid)) {
-      break;
-    }
-    return uid;
-  }
-  throw std::runtime_error("failed to read process uid from " + status_path.string());
+  return ReadProcessStatusFields(pid).uids[0];
+}
+
+gid_t ReadProcessRealGid(pid_t pid) {
+  return ReadProcessStatusFields(pid).gids[0];
 }
 
 std::string ReadProcessExecutablePath(pid_t pid) {
@@ -406,6 +516,7 @@ ProcessIdentity ReadProcessIdentity(pid_t pid) {
   ProcessIdentity identity;
   identity.pid = pid;
   identity.uid = ReadProcessRealUid(pid);
+  identity.gid = ReadProcessRealGid(pid);
   identity.start_time_ticks = ReadProcessStartTimeTicks(pid);
   return identity;
 }
@@ -413,6 +524,7 @@ ProcessIdentity ReadProcessIdentity(pid_t pid) {
 bool ProcessIdentityMatches(
     pid_t pid,
     uid_t expected_uid,
+    gid_t expected_gid,
     const std::string& expected_start_time_ticks) {
   if (pid <= 0 || expected_start_time_ticks.empty()) {
     return false;
@@ -423,10 +535,86 @@ bool ProcessIdentityMatches(
     }
     const ProcessIdentity identity = ReadProcessIdentity(pid);
     return identity.uid == expected_uid &&
+           identity.gid == expected_gid &&
            identity.start_time_ticks == expected_start_time_ticks;
   } catch (...) {
     return false;
   }
+}
+
+bool ProcessMatchesPeerSecurity(
+    pid_t pid,
+    uid_t expected_uid,
+    gid_t expected_gid,
+    const std::string& expected_start_time_ticks,
+    std::string* reason) {
+  auto set_reason = [&](const std::string& value) {
+    if (reason != nullptr) {
+      *reason = value;
+    }
+  };
+
+  if (pid <= 0 || expected_start_time_ticks.empty()) {
+    set_reason("invalid process identity");
+    return false;
+  }
+  try {
+    if (!IsProcessAlive(pid)) {
+      set_reason("process is not running");
+      return false;
+    }
+    const ProcessIdentity identity = ReadProcessIdentity(pid);
+    if (identity.start_time_ticks != expected_start_time_ticks) {
+      set_reason("process start time changed");
+      return false;
+    }
+    const ProcessStatusFields status = ReadProcessStatusFields(pid);
+    if (!MatchesExpectedUidTuple(status.uids, expected_uid)) {
+      set_reason("process uid tuple is elevated or no longer owned by the caller");
+      return false;
+    }
+    if (!MatchesExpectedGidTuple(status.gids, expected_gid)) {
+      set_reason("process gid tuple is elevated or no longer owned by the caller");
+      return false;
+    }
+    if (!IsZeroCapabilityMask(status.cap_inh) || !IsZeroCapabilityMask(status.cap_prm) ||
+        !IsZeroCapabilityMask(status.cap_eff) || !IsZeroCapabilityMask(status.cap_amb)) {
+      set_reason("process holds Linux capabilities");
+      return false;
+    }
+    return true;
+  } catch (const std::exception& error) {
+    set_reason(error.what());
+    return false;
+  }
+}
+
+void ValidateManagedExecutable(const std::string& path) {
+  if (!IsAbsolutePath(path)) {
+    throw std::runtime_error("managed job executable must be absolute");
+  }
+
+  struct stat executable_stat {};
+  if (stat(path.c_str(), &executable_stat) != 0) {
+    ThrowErrno("stat(" + path + ")");
+  }
+  if ((executable_stat.st_mode & S_ISUID) != 0 || (executable_stat.st_mode & S_ISGID) != 0) {
+    throw std::runtime_error("managed job executable may not be setuid or setgid");
+  }
+
+  errno = 0;
+  const ssize_t capability_size = getxattr(path.c_str(), "security.capability", nullptr, 0);
+  if (capability_size >= 0) {
+    throw std::runtime_error("managed job executable may not have file capabilities");
+  }
+  if (errno == ENODATA || errno == ENOTSUP
+#ifdef ENOATTR
+      || errno == ENOATTR
+#endif
+  ) {
+    return;
+  }
+  ThrowErrno("getxattr(" + path + ", security.capability)");
 }
 
 std::string UidToString(uid_t uid) {

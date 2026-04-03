@@ -18,6 +18,7 @@ namespace snapshotd {
 struct ProcessIdentity {
   pid_t pid = 0;
   uid_t uid = 0;
+  gid_t gid = 0;
   std::string start_time_ticks;
 };
 
@@ -75,6 +76,8 @@ bool IsProcessAlive(pid_t pid);
 std::string ReadProcessStartTimeTicks(pid_t pid);
 /** @brief Read the real UID that owns the process. */
 uid_t ReadProcessRealUid(pid_t pid);
+/** @brief Read the real GID that owns the process. */
+gid_t ReadProcessRealGid(pid_t pid);
 /** @brief Resolve `/proc/<pid>/exe`. */
 std::string ReadProcessExecutablePath(pid_t pid);
 /** @brief Resolve `/proc/<pid>/cwd`. */
@@ -83,11 +86,32 @@ std::string ReadProcessWorkingDirectory(pid_t pid);
 std::vector<std::string> ReadProcessCommandLine(pid_t pid);
 /** @brief Read the process fields needed to guard against PID reuse. */
 ProcessIdentity ReadProcessIdentity(pid_t pid);
-/** @brief Return true only if the pid still belongs to the expected uid/start-time pair. */
+/**
+ * @brief Return true only if the pid still belongs to the expected real
+ * uid/gid and start-time tuple.
+ *
+ * This is a PID-reuse check, not a full privilege-state check.
+ */
 bool ProcessIdentityMatches(
     pid_t pid,
     uid_t expected_uid,
+    gid_t expected_gid,
     const std::string& expected_start_time_ticks);
+/**
+ * @brief Return true only if the process still matches the expected start time
+ * and has no elevated uid/gid/capability state relative to the caller.
+ */
+bool ProcessMatchesPeerSecurity(
+    pid_t pid,
+    uid_t expected_uid,
+    gid_t expected_gid,
+    const std::string& expected_start_time_ticks,
+    std::string* reason = nullptr);
+/**
+ * @brief Reject managed-job executables that would grant extra privilege on
+ * exec, such as setuid/setgid or file-capability binaries.
+ */
+void ValidateManagedExecutable(const std::string& path);
 /** @brief Convert uid/gid/pid values into decimal strings. */
 std::string UidToString(uid_t uid);
 std::string GidToString(gid_t gid);

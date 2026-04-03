@@ -18,9 +18,11 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -166,6 +168,9 @@ LaunchResult LaunchManagedJob(
   if (!IsAbsolutePath(cwd)) {
     throw std::runtime_error("run cwd must be absolute");
   }
+  // Reject obviously privileged binaries before exec so the broker never
+  // launches a managed job that can elevate itself through file metadata.
+  ValidateManagedExecutable(argv.front());
 
   struct passwd* pwd = getpwuid(peer.uid);
   const std::string home = pwd && pwd->pw_dir ? pwd->pw_dir : cwd;
@@ -276,8 +281,14 @@ LaunchResult LaunchManagedJob(
     }
     ThrowErrno(context);
   }
-  if (!ProcessIdentityMatches(child, peer.uid, start_time_ticks)) {
+  if (!ProcessIdentityMatches(child, peer.uid, peer.gid, start_time_ticks)) {
     throw std::runtime_error("managed job identity did not stabilize after exec");
+  }
+  std::string launch_reason;
+  if (!ProcessMatchesPeerSecurity(child, peer.uid, peer.gid, start_time_ticks, &launch_reason)) {
+    kill(child, SIGKILL);
+    (void)!waitpid(child, nullptr, 0);
+    throw std::runtime_error("managed job failed security validation after exec: " + launch_reason);
   }
   return {child, start_time_ticks};
 }
@@ -338,8 +349,10 @@ JobRecord CreatePidOwnedJob(Store* store, const PeerCred& peer, pid_t target_pid
   // This is the narrow self-checkpoint bridge used by downstream runtimes. It
   // still records a managed job and pins ownership to the connected peer uid.
   const ProcessIdentity identity = ReadProcessIdentity(target_pid);
-  if (identity.uid != peer.uid) {
-    throw std::runtime_error("checkpoint target belongs to another uid");
+  std::string reason;
+  if (!ProcessMatchesPeerSecurity(
+          target_pid, peer.uid, peer.gid, identity.start_time_ticks, &reason)) {
+    throw std::runtime_error("checkpoint target is not a safe peer-owned process: " + reason);
   }
   const std::string executable = ReadProcessExecutablePath(target_pid);
   const std::string cwd = ReadProcessWorkingDirectory(target_pid);
@@ -430,30 +443,86 @@ std::vector<std::string> BuildWorkerCommand(
   return command;
 }
 
-void WaitForWorkerSuccess(const std::vector<std::string>& command) {
+void WaitForWorkerSuccess(
+    const std::vector<std::string>& command,
+    std::chrono::seconds timeout) {
   const pid_t child = fork();
   if (child < 0) {
     ThrowErrno("fork");
   }
   if (child == 0) {
+    // Put the worker and anything it spawns into its own process group so a
+    // timeout can terminate the whole subtree, not just the top-level worker.
+    if (setpgid(0, 0) != 0) {
+      _exit(127);
+    }
     std::vector<char*> argv = MakeArgv(command);
     execv(command.front().c_str(), argv.data());
     _exit(127);
   }
+  (void)!setpgid(child, child);
 
-  int status = 0;
-  if (waitpid(child, &status, 0) < 0) {
-    ThrowErrno("waitpid");
-  }
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    throw std::runtime_error("worker invocation failed: " + JoinCommandLine(command));
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (true) {
+    int status = 0;
+    const pid_t waited = waitpid(child, &status, WNOHANG);
+    if (waited < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      ThrowErrno("waitpid");
+    }
+    if (waited == child) {
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        throw std::runtime_error("worker invocation failed: " + JoinCommandLine(command));
+      }
+      return;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      (void)!kill(-child, SIGTERM);
+      const auto kill_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (true) {
+        const pid_t timed_out_wait = waitpid(child, &status, WNOHANG);
+        if (timed_out_wait == child) {
+          break;
+        }
+        if (timed_out_wait < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          if (errno == ECHILD) {
+            break;
+          }
+          ThrowErrno("waitpid");
+        }
+        if (std::chrono::steady_clock::now() >= kill_deadline) {
+          (void)!kill(-child, SIGKILL);
+          if (waitpid(child, &status, 0) < 0 && errno != ECHILD) {
+            ThrowErrno("waitpid");
+          }
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      throw std::runtime_error(
+          "worker invocation timed out after " + std::to_string(timeout.count()) +
+          "s: " + JoinCommandLine(command));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 }
 
 void UpdateJobLiveness(const Store& store, JobRecord* job) {
   std::string new_state = "exited";
-  if (ProcessIdentityMatches(job->pid, job->owner_uid, job->start_time_ticks)) {
+  std::string reason;
+  if (ProcessMatchesPeerSecurity(
+          job->pid, job->owner_uid, job->owner_gid, job->start_time_ticks, &reason)) {
     new_state = "running";
+  } else if (ProcessIdentityMatches(
+                 job->pid, job->owner_uid, job->owner_gid, job->start_time_ticks)) {
+    // The job still maps to the same PID/start-time tuple, but its credentials
+    // drifted away from the caller's unprivileged state.
+    new_state = "unsafe";
   } else if (IsProcessAlive(job->pid)) {
     new_state = "stale";
   }
@@ -465,8 +534,10 @@ void UpdateJobLiveness(const Store& store, JobRecord* job) {
 
 void AdoptManagedPid(JobRecord* job, pid_t pid) {
   const ProcessIdentity identity = ReadProcessIdentity(pid);
-  if (identity.uid != job->owner_uid) {
-    throw std::runtime_error("restored pid owner mismatch");
+  std::string reason;
+  if (!ProcessMatchesPeerSecurity(
+          identity.pid, job->owner_uid, job->owner_gid, identity.start_time_ticks, &reason)) {
+    throw std::runtime_error("restored pid failed security validation: " + reason);
   }
   job->pid = identity.pid;
   job->start_time_ticks = identity.start_time_ticks;
@@ -509,6 +580,7 @@ DaemonConfig ParseArgs(int argc, char** argv) {
   config.worker_path = "/usr/libexec/snapshotd/snapshot-worker";
   config.criu_bin = "/usr/local/sbin/criu";
   config.criu_ns_bin = DefaultCriuNsPath(config.criu_bin);
+  config.worker_timeout_seconds = 600;
 
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
@@ -530,6 +602,11 @@ DaemonConfig ParseArgs(int argc, char** argv) {
       config.criu_ns_bin = DefaultCriuNsPath(config.criu_bin);
     } else if (arg == "--criu-ns-bin") {
       config.criu_ns_bin = require_value(arg);
+    } else if (arg == "--worker-timeout-seconds") {
+      config.worker_timeout_seconds = std::stoi(require_value(arg));
+      if (config.worker_timeout_seconds <= 0) {
+        throw std::runtime_error("worker timeout must be > 0 seconds");
+      }
     } else if (arg == "--ready-file") {
       config.ready_file = require_value(arg);
     } else {
@@ -587,8 +664,15 @@ Message HandleRequest(
     if (job.state != "running") {
       throw std::runtime_error("cannot checkpoint a non-running managed job");
     }
-    // Revalidate pid + start_time before the privileged worker runs so a stale
-    // job id cannot drift onto a reused pid.
+    std::string reason;
+    if (!ProcessMatchesPeerSecurity(
+            job.pid, job.owner_uid, job.owner_gid, job.start_time_ticks, &reason)) {
+      UpdateJobLiveness(*store, &job);
+      throw std::runtime_error("managed job is not safe to checkpoint: " + reason);
+    }
+    // Revalidate pid + start_time + unprivileged credentials before the
+    // privileged worker runs so a stale or elevated job id cannot drift onto a
+    // reused or newly-privileged pid.
     CheckpointRecord checkpoint = store->CreateCheckpoint(job);
     store->SaveCheckpoint(job, checkpoint);
     const std::vector<std::string> extra_args =
@@ -597,7 +681,8 @@ Message HandleRequest(
     try {
       WaitForWorkerSuccess(
           BuildWorkerCommand(
-              config, *store, job, checkpoint, "dump", extra_args, namespace_dump));
+              config, *store, job, checkpoint, "dump", extra_args, namespace_dump),
+          std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "failed";
       store->SaveCheckpoint(job, checkpoint);
@@ -626,10 +711,16 @@ Message HandleRequest(
     const std::vector<std::string> extra_args =
         ValidateExtraArgs(request.GetAll("extra_arg"));
     const bool namespace_dump = MessageFlagEnabled(request, "namespace_dump");
+    std::string reason;
+    if (!ProcessMatchesPeerSecurity(
+            job.pid, job.owner_uid, job.owner_gid, job.start_time_ticks, &reason)) {
+      throw std::runtime_error("checkpoint target is not safe to checkpoint: " + reason);
+    }
     try {
       WaitForWorkerSuccess(
           BuildWorkerCommand(
-              config, *store, job, checkpoint, "dump", extra_args, namespace_dump));
+              config, *store, job, checkpoint, "dump", extra_args, namespace_dump),
+          std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "failed";
       store->SaveCheckpoint(job, checkpoint);
@@ -660,9 +751,7 @@ Message HandleRequest(
     CheckpointRecord checkpoint = store->LoadCheckpoint(job, checkpoint_id);
     const std::vector<std::string> extra_args =
         ValidateExtraArgs(request.GetAll("extra_arg"));
-    const bool namespace_restore = request.Get("namespace_restore").empty()
-                                       ? true
-                                       : MessageFlagEnabled(request, "namespace_restore");
+    const bool namespace_restore = MessageFlagEnabled(request, "namespace_restore");
     try {
       WaitForWorkerSuccess(
           BuildWorkerCommand(
@@ -672,7 +761,8 @@ Message HandleRequest(
               checkpoint,
               "restore",
               extra_args,
-              namespace_restore));
+              namespace_restore),
+          std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "restore-failed";
       store->SaveCheckpoint(job, checkpoint);
@@ -715,6 +805,7 @@ int RunDaemon(const DaemonConfig& config) {
 
   signal(SIGTERM, SignalHandler);
   signal(SIGINT, SignalHandler);
+  signal(SIGPIPE, SIG_IGN);
 
   const bool inherited_socket = UseSystemdSocketActivation();
   const int listen_fd = inherited_socket ? 3 : CreateSocket(config.socket_path);
@@ -758,11 +849,20 @@ int RunDaemon(const DaemonConfig& config) {
       const PeerCred peer = GetPeerCred(client_fd);
       const Message request = ReceiveMessage(client_fd);
       const Message response = HandleRequest(request, peer, config, &store);
-      SendMessage(client_fd, response);
+      try {
+        SendMessage(client_fd, response);
+      } catch (...) {
+      }
     } catch (const RequestError& error) {
-      SendMessage(client_fd, ErrorResponse(error));
+      try {
+        SendMessage(client_fd, ErrorResponse(error));
+      } catch (...) {
+      }
     } catch (const std::exception& error) {
-      SendMessage(client_fd, ErrorResponse("request_failed", error.what()));
+      try {
+        SendMessage(client_fd, ErrorResponse("request_failed", error.what()));
+      } catch (...) {
+      }
     }
     close(client_fd);
   }
