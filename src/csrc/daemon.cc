@@ -43,6 +43,7 @@ void SignalHandler(int) {
   g_terminate.store(true);
 }
 
+/** @brief Derive the default `criu-ns` sibling path from a `criu` binary path. */
 std::string DefaultCriuNsPath(const std::string& criu_bin);
 
 bool UseSystemdSocketActivation() {
@@ -55,6 +56,7 @@ bool UseSystemdSocketActivation() {
          std::stoi(listen_fds) >= 1;
 }
 
+/** @brief Strip leading and trailing ASCII whitespace from one config token. */
 std::string TrimAsciiWhitespace(const std::string& value) {
   std::size_t begin = 0;
   while (begin < value.size() &&
@@ -69,6 +71,14 @@ std::string TrimAsciiWhitespace(const std::string& value) {
   return value.substr(begin, end - begin);
 }
 
+/**
+ * @brief Apply one validated `key=value` entry from the daemon config file.
+ *
+ * @param config Config object to update.
+ * @param key Parsed config key.
+ * @param value Parsed config value.
+ * @param source Human-readable config source path used in error text.
+ */
 void ApplyConfigEntry(
     DaemonConfig* config,
     const std::string& key,
@@ -100,6 +110,12 @@ void ApplyConfigEntry(
   throw std::runtime_error("unknown snapshotd config key in " + source + ": " + key);
 }
 
+/**
+ * @brief Parse a flat `key=value` daemon config file and merge it into @p config.
+ *
+ * Blank lines and `#` comments are ignored. Later CLI flags may still override
+ * the resulting values.
+ */
 void LoadConfigFile(const std::string& path, DaemonConfig* config) {
   std::istringstream lines(ReadTextFile(path));
   std::string line;
