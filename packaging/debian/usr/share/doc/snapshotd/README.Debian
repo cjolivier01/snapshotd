@@ -1,0 +1,31 @@
+snapshotd installs a socket-activated root broker for CRIU checkpoint/restore.
+
+This package intentionally does not depend on a distro CRIU package.
+It requires CRIU to be provisioned separately at:
+  /usr/local/sbin/criu
+
+Package installation fails if that path is missing or not executable.
+
+User-facing command:
+  /usr/bin/snapshotctl
+
+Privileged service components:
+  /usr/libexec/snapshotd/snapshotd
+  /usr/libexec/snapshotd/snapshot-worker
+
+The systemd socket is restricted to the snapshot-users group:
+  /run/snapshotd.sock
+
+Add trusted users to that group if they should be allowed to create managed
+jobs and request checkpoints/restores:
+  sudo usermod -aG snapshot-users <user>
+
+The broker stores managed job state and checkpoint images under:
+  /var/lib/snapshotd
+
+Checkpoint/log exports for user-visible troubleshooting are also published under
+that tree, but restore still uses the broker-owned checkpoint metadata and
+images rather than the exported copy.
+
+The worker always invokes CRIU with a fixed argument allowlist and
+--no-default-config. Users do not receive direct sudo access to CRIU.

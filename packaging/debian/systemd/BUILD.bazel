@@ -1,0 +1,4 @@
+exports_files([
+    "snapshotd.service",
+    "snapshotd.socket",
+])

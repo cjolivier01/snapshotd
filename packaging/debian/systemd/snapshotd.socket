@@ -1,0 +1,13 @@
+[Unit]
+Description=Snapshot privileged CRIU broker socket
+
+[Socket]
+ListenStream=/run/snapshotd.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=snapshot-users
+RemoveOnStop=yes
+Service=snapshotd.service
+
+[Install]
+WantedBy=sockets.target
