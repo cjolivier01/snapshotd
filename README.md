@@ -52,7 +52,7 @@ The short version for IT/security review:
 
 Authoritative privileged checkpoints are consolidated under `/var/lib/snapshotd`
 in a root-owned private tree. User-readable compatibility exports live in a
-separate exports tree under the same state root.
+separate broker-owned read-only exports tree under the same state root.
 
 That is different from rootless `snapshot` autosnapshots, which live in the
 caller-selected runtime directory.

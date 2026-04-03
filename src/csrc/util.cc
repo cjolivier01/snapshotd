@@ -745,6 +745,25 @@ void ChownTree(const fs::path& root, uid_t uid, gid_t gid) {
   }
 }
 
+void SetTreePermissions(
+    const fs::path& root,
+    mode_t directory_mode,
+    mode_t file_mode) {
+  if (!PathExists(root)) {
+    return;
+  }
+  auto chmod_one = [&](const fs::path& path, mode_t mode) {
+    if (chmod(path.c_str(), mode) != 0) {
+      ThrowErrno("chmod(" + path.string() + ")");
+    }
+  };
+  chmod_one(root, directory_mode);
+  for (const auto& entry : fs::recursive_directory_iterator(root)) {
+    const mode_t mode = entry.is_directory() ? directory_mode : file_mode;
+    chmod_one(entry.path(), mode);
+  }
+}
+
 std::uint64_t DirectoryTreeSizeBytes(const fs::path& root) {
   if (!PathExists(root)) {
     return 0;

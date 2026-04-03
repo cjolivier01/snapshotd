@@ -41,8 +41,8 @@ The broker stores managed job state and checkpoint images under:
   /var/lib/snapshotd
 
 Checkpoint/log exports for user-visible troubleshooting are also published under
-that tree, but restore still uses the broker-owned checkpoint metadata and
-images rather than the exported copy.
+that tree as broker-owned read-only copies, but restore still uses the
+broker-owned checkpoint metadata and images rather than the exported copy.
 
 The worker always invokes CRIU with a fixed argument allowlist and
 --no-default-config. Users do not receive direct sudo access to CRIU.

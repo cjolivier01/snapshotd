@@ -535,7 +535,10 @@ fs::path ExportCheckpointArtifacts(const Store& store, const JobRecord& job, con
   EnsureDir(export_dir, 0700);
   CopyTree(checkpoint_dir / "images", export_dir / "images");
   CopyTree(checkpoint_dir / "logs", export_dir / "logs");
-  ChownTree(export_dir, job.owner_uid, job.owner_gid);
+  // Export artifacts are a compatibility/readability surface only. Keep them
+  // broker-owned and read-only so callers cannot inflate or tamper with the
+  // files that quota accounting and troubleshooting depend on.
+  SetTreePermissions(export_dir, 0755, 0644);
   return export_dir;
 }
 
@@ -844,8 +847,11 @@ std::uint64_t RefreshCheckpointSize(
     const Store& store,
     const JobRecord& job,
     CheckpointRecord* checkpoint) {
-  const std::uint64_t size_bytes = DirectoryTreeSizeBytes(
-      store.CheckpointDir(job.owner_uid, job.job_id, checkpoint->checkpoint_id));
+  const std::uint64_t size_bytes =
+      DirectoryTreeSizeBytes(
+          store.CheckpointDir(job.owner_uid, job.job_id, checkpoint->checkpoint_id)) +
+      DirectoryTreeSizeBytes(
+          store.ExportCheckpointDir(job.owner_uid, job.job_id, checkpoint->checkpoint_id));
   checkpoint->size_bytes = std::to_string(size_bytes);
   return size_bytes;
 }

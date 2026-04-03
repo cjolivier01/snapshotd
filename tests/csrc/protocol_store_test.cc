@@ -252,12 +252,21 @@ void TestPruneCheckpointsPrefersColdEntriesUnderByteBudget() {
         store.CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id) / "images" /
             "payload.bin",
         std::string(128, fill));
+    snapshotd::WriteTextFile(
+        store.ExportCheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id) /
+            "images" / "payload.bin",
+        std::string(128, static_cast<char>(fill + 1)),
+        0644,
+        0755);
     checkpoint.state = "ready";
     checkpoint.created_at = created_at;
     store.SaveCheckpoint(job, checkpoint);
     checkpoint = store.LoadCheckpoint(job, checkpoint.checkpoint_id);
-    checkpoint.size_bytes = std::to_string(snapshotd::DirectoryTreeSizeBytes(
-        store.CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id)));
+    checkpoint.size_bytes = std::to_string(
+        snapshotd::DirectoryTreeSizeBytes(
+            store.CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id)) +
+        snapshotd::DirectoryTreeSizeBytes(
+            store.ExportCheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id)));
     store.SaveCheckpoint(job, checkpoint);
     return checkpoint;
   };
@@ -272,10 +281,16 @@ void TestPruneCheckpointsPrefersColdEntriesUnderByteBudget() {
   job.latest_checkpoint = latest.checkpoint_id;
   store.SaveJob(job);
 
-  const std::uint64_t latest_size = snapshotd::DirectoryTreeSizeBytes(
-      store.CheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id));
-  const std::uint64_t hot_size = snapshotd::DirectoryTreeSizeBytes(
-      store.CheckpointDir(job.owner_uid, job.job_id, hot.checkpoint_id));
+  const std::uint64_t latest_size =
+      snapshotd::DirectoryTreeSizeBytes(
+          store.CheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id)) +
+      snapshotd::DirectoryTreeSizeBytes(
+          store.ExportCheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id));
+  const std::uint64_t hot_size =
+      snapshotd::DirectoryTreeSizeBytes(
+          store.CheckpointDir(job.owner_uid, job.job_id, hot.checkpoint_id)) +
+      snapshotd::DirectoryTreeSizeBytes(
+          store.ExportCheckpointDir(job.owner_uid, job.job_id, hot.checkpoint_id));
 
   snapshotd::DaemonConfig config;
   config.max_checkpoint_age_seconds = 0;

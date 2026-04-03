@@ -177,8 +177,8 @@ That means retention needs both:
 - optional per-user quotas under `/var/lib/snapshotd/<uid>/...`
 
 The root-owned `jobs/` tree is the authoritative restore input. The user-facing
-`exports/` tree is a compatibility copy and is pruned together with the
-authoritative checkpoint it mirrors.
+`exports/` tree is a broker-owned read-only compatibility copy and is pruned
+together with the authoritative checkpoint it mirrors.
 
 ### Persisted Metadata
 
@@ -196,6 +196,7 @@ Implemented fields:
 
 Recommended derived values:
 
+- total bytes per checkpoint, including its export copy
 - total bytes per job
 - total bytes per UID subtree
 - total bytes under the entire state root
