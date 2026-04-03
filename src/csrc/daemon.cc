@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -42,6 +43,8 @@ void SignalHandler(int) {
   g_terminate.store(true);
 }
 
+std::string DefaultCriuNsPath(const std::string& criu_bin);
+
 bool UseSystemdSocketActivation() {
   const std::string listen_pid = GetEnv("LISTEN_PID");
   const std::string listen_fds = GetEnv("LISTEN_FDS");
@@ -50,6 +53,76 @@ bool UseSystemdSocketActivation() {
   }
   return static_cast<pid_t>(std::stol(listen_pid)) == getpid() &&
          std::stoi(listen_fds) >= 1;
+}
+
+std::string TrimAsciiWhitespace(const std::string& value) {
+  std::size_t begin = 0;
+  while (begin < value.size() &&
+         std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+    ++begin;
+  }
+  std::size_t end = value.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return value.substr(begin, end - begin);
+}
+
+void ApplyConfigEntry(
+    DaemonConfig* config,
+    const std::string& key,
+    const std::string& value,
+    const std::string& source) {
+  if (value.empty()) {
+    throw std::runtime_error("empty value for " + key + " in " + source);
+  }
+  if (key == "state_dir") {
+    config->state_dir = value;
+    return;
+  }
+  if (key == "criu_bin") {
+    config->criu_bin = value;
+    config->criu_ns_bin = DefaultCriuNsPath(config->criu_bin);
+    return;
+  }
+  if (key == "criu_ns_bin") {
+    config->criu_ns_bin = value;
+    return;
+  }
+  if (key == "worker_timeout_seconds") {
+    config->worker_timeout_seconds = std::stoi(value);
+    if (config->worker_timeout_seconds <= 0) {
+      throw std::runtime_error("worker timeout must be > 0 seconds");
+    }
+    return;
+  }
+  throw std::runtime_error("unknown snapshotd config key in " + source + ": " + key);
+}
+
+void LoadConfigFile(const std::string& path, DaemonConfig* config) {
+  std::istringstream lines(ReadTextFile(path));
+  std::string line;
+  int line_number = 0;
+  while (std::getline(lines, line)) {
+    ++line_number;
+    const std::string trimmed = TrimAsciiWhitespace(line);
+    if (trimmed.empty() || trimmed[0] == '#') {
+      continue;
+    }
+    const std::size_t delimiter = trimmed.find('=');
+    if (delimiter == std::string::npos) {
+      throw std::runtime_error(
+          "invalid snapshotd config line " + std::to_string(line_number) + " in " + path);
+    }
+    const std::string key = TrimAsciiWhitespace(trimmed.substr(0, delimiter));
+    const std::string value = TrimAsciiWhitespace(trimmed.substr(delimiter + 1));
+    if (key.empty()) {
+      throw std::runtime_error(
+          "empty snapshotd config key on line " + std::to_string(line_number) + " in " + path);
+    }
+    ApplyConfigEntry(config, key, value, path);
+  }
 }
 
 int CreateSocket(const std::string& socket_path) {
@@ -616,6 +689,21 @@ DaemonConfig ParseArgs(int argc, char** argv) {
   config.criu_ns_bin = DefaultCriuNsPath(config.criu_bin);
   config.worker_timeout_seconds = 600;
 
+  std::string config_path;
+  for (int index = 1; index < argc; ++index) {
+    const std::string arg = argv[index];
+    if (arg != "--config") {
+      continue;
+    }
+    if (index + 1 >= argc) {
+      throw std::runtime_error("missing value for --config");
+    }
+    config_path = argv[++index];
+  }
+  if (!config_path.empty()) {
+    LoadConfigFile(config_path, &config);
+  }
+
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
     auto require_value = [&](const std::string& flag) -> std::string {
@@ -627,6 +715,8 @@ DaemonConfig ParseArgs(int argc, char** argv) {
     };
     if (arg == "--socket-path") {
       config.socket_path = require_value(arg);
+    } else if (arg == "--config") {
+      (void)require_value(arg);
     } else if (arg == "--state-dir") {
       config.state_dir = require_value(arg);
     } else if (arg == "--worker-path") {

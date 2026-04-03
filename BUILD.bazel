@@ -1,9 +1,11 @@
 genrule(
     name = "snapshotd_deb",
     srcs = [
+        "//packaging/debian/DEBIAN:conffiles",
         "//packaging/debian/DEBIAN:preinst",
         "//packaging/debian/DEBIAN:postinst",
         "//packaging/debian/DEBIAN:prerm",
+        "//packaging/debian/etc/snapshotd:snapshotd.conf",
         "//packaging/debian/systemd:snapshotd.service",
         "//packaging/debian/systemd:snapshotd.socket",
         "//packaging/debian/usr/lib/tmpfiles.d:snapshotd.conf",
@@ -21,9 +23,11 @@ genrule(
           "--snapshotctl $(location //src/csrc:snapshotctl) " +
           "--snapshotd $(location //src/csrc:snapshotd) " +
           "--snapshot-worker $(location //src/csrc:snapshot-worker) " +
+          "--conffiles $(location //packaging/debian/DEBIAN:conffiles) " +
           "--preinst $(location //packaging/debian/DEBIAN:preinst) " +
           "--postinst $(location //packaging/debian/DEBIAN:postinst) " +
           "--prerm $(location //packaging/debian/DEBIAN:prerm) " +
+          "--daemon-config $(location //packaging/debian/etc/snapshotd:snapshotd.conf) " +
           "--service $(location //packaging/debian/systemd:snapshotd.service) " +
           "--socket $(location //packaging/debian/systemd:snapshotd.socket) " +
           "--tmpfiles $(location //packaging/debian/usr/lib/tmpfiles.d:snapshotd.conf) " +

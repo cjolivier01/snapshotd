@@ -149,7 +149,8 @@ pid_t SpawnDaemon(
     const fs::path& fake_criu_ns,
     const fs::path& ready_file,
     const std::map<std::string, std::string>& env,
-    int worker_timeout_seconds = 0) {
+    int worker_timeout_seconds = 0,
+    const fs::path& config_path = {}) {
   const pid_t child = fork();
   if (child < 0) {
     throw std::runtime_error("fork failed");
@@ -162,15 +163,20 @@ pid_t SpawnDaemon(
         daemon_bin.string(),
         "--socket-path",
         socket_path.string(),
-        "--state-dir",
-        state_dir.string(),
         "--worker-path",
         worker_bin.string(),
-        "--criu-bin",
-        fake_criu.string(),
-        "--criu-ns-bin",
-        fake_criu_ns.string(),
     };
+    if (!config_path.empty()) {
+      argv.push_back("--config");
+      argv.push_back(config_path.string());
+    } else {
+      argv.push_back("--state-dir");
+      argv.push_back(state_dir.string());
+      argv.push_back("--criu-bin");
+      argv.push_back(fake_criu.string());
+      argv.push_back("--criu-ns-bin");
+      argv.push_back(fake_criu_ns.string());
+    }
     if (worker_timeout_seconds > 0) {
       argv.push_back("--worker-timeout-seconds");
       argv.push_back(std::to_string(worker_timeout_seconds));
@@ -517,6 +523,7 @@ void TestWorkerTimeoutCancelsHungOperation() {
   const fs::path socket_path = temp_dir / "snapshotd.sock";
   const fs::path state_dir = temp_dir / "state";
   const fs::path ready_file = temp_dir / "ready";
+  const fs::path config_path = temp_dir / "snapshotd.conf";
   const fs::path fake_criu = temp_dir / "fake-criu-timeout.sh";
   const fs::path fake_criu_ns = temp_dir / "criu-ns";
   const fs::path daemon_bin = Runfile("src/csrc/snapshotd");
@@ -545,6 +552,15 @@ void TestWorkerTimeoutCancelsHungOperation() {
       "  printf '%s\\n' 'timeout log' > \"$logfile\"\n"
       "fi\n");
   WriteExecutable(fake_criu_ns, snapshotd::ReadTextFile(fake_criu));
+  snapshotd::WriteTextFile(
+      config_path,
+      "# comment to exercise config-file parsing\n"
+      "state_dir=" + state_dir.string() + "\n"
+      "criu_bin=" + fake_criu.string() + "\n"
+      "criu_ns_bin=" + fake_criu_ns.string() + "\n"
+      "worker_timeout_seconds=5\n",
+      0644,
+      0700);
 
   const pid_t daemon_pid = SpawnDaemon(
       daemon_bin,
@@ -555,7 +571,8 @@ void TestWorkerTimeoutCancelsHungOperation() {
       fake_criu_ns,
       ready_file,
       {},
-      1);
+      1,
+      config_path);
   pid_t job_pid = 0;
   try {
     WaitForPath(ready_file, std::chrono::milliseconds(5000));

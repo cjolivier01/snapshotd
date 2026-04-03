@@ -5,9 +5,11 @@ output=""
 snapshotctl=""
 snapshotd=""
 snapshot_worker=""
+conffiles=""
 preinst=""
 postinst=""
 prerm=""
+daemon_config=""
 service_unit=""
 socket_unit=""
 tmpfiles_conf=""
@@ -31,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       snapshot_worker="$2"
       shift 2
       ;;
+    --conffiles)
+      conffiles="$2"
+      shift 2
+      ;;
     --preinst)
       preinst="$2"
       shift 2
@@ -41,6 +47,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --prerm)
       prerm="$2"
+      shift 2
+      ;;
+    --daemon-config)
+      daemon_config="$2"
       shift 2
       ;;
     --service)
@@ -70,9 +80,11 @@ done
 [[ -n "$snapshotctl" ]]
 [[ -n "$snapshotd" ]]
 [[ -n "$snapshot_worker" ]]
+[[ -n "$conffiles" ]]
 [[ -n "$preinst" ]]
 [[ -n "$postinst" ]]
 [[ -n "$prerm" ]]
+[[ -n "$daemon_config" ]]
 [[ -n "$service_unit" ]]
 [[ -n "$socket_unit" ]]
 [[ -n "$tmpfiles_conf" ]]
@@ -83,6 +95,7 @@ trap 'rm -rf "$pkgroot"' EXIT
 
 mkdir -p \
   "$pkgroot/DEBIAN" \
+  "$pkgroot/etc/snapshotd" \
   "$pkgroot/usr/bin" \
   "$pkgroot/usr/libexec/snapshotd" \
   "$pkgroot/lib/systemd/system" \
@@ -92,9 +105,11 @@ mkdir -p \
 cp "$snapshotctl" "$pkgroot/usr/bin/snapshotctl"
 cp "$snapshotd" "$pkgroot/usr/libexec/snapshotd/snapshotd"
 cp "$snapshot_worker" "$pkgroot/usr/libexec/snapshotd/snapshot-worker"
+cp "$conffiles" "$pkgroot/DEBIAN/conffiles"
 cp "$preinst" "$pkgroot/DEBIAN/preinst"
 cp "$postinst" "$pkgroot/DEBIAN/postinst"
 cp "$prerm" "$pkgroot/DEBIAN/prerm"
+cp "$daemon_config" "$pkgroot/etc/snapshotd/snapshotd.conf"
 cp "$service_unit" "$pkgroot/lib/systemd/system/snapshotd.service"
 cp "$socket_unit" "$pkgroot/lib/systemd/system/snapshotd.socket"
 cp "$tmpfiles_conf" "$pkgroot/usr/lib/tmpfiles.d/snapshotd.conf"
@@ -107,6 +122,10 @@ chmod 0755 \
   "$pkgroot/DEBIAN/preinst" \
   "$pkgroot/DEBIAN/postinst" \
   "$pkgroot/DEBIAN/prerm"
+
+chmod 0644 \
+  "$pkgroot/DEBIAN/conffiles" \
+  "$pkgroot/etc/snapshotd/snapshotd.conf"
 
 cat > "$pkgroot/DEBIAN/control" <<'EOF'
 Package: snapshotd

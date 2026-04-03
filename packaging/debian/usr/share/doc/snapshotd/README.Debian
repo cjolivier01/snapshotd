@@ -13,6 +13,18 @@ Privileged service components:
   /usr/libexec/snapshotd/snapshotd
   /usr/libexec/snapshotd/snapshot-worker
 
+Daemon configuration file:
+  /etc/snapshotd/snapshotd.conf
+
+That file controls daemon-owned runtime settings such as:
+  state_dir
+  criu_bin
+  criu_ns_bin
+  worker_timeout_seconds
+
+Socket settings remain in the systemd socket unit rather than the daemon
+config file.
+
 The systemd socket is restricted to the snapshot-users group:
   /run/snapshotd.sock
 
