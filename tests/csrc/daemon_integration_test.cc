@@ -1,9 +1,12 @@
+#include <sys/socket.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -145,7 +148,8 @@ pid_t SpawnDaemon(
     const fs::path& fake_criu,
     const fs::path& fake_criu_ns,
     const fs::path& ready_file,
-    const std::map<std::string, std::string>& env) {
+    const std::map<std::string, std::string>& env,
+    int worker_timeout_seconds = 0) {
   const pid_t child = fork();
   if (child < 0) {
     throw std::runtime_error("fork failed");
@@ -166,9 +170,13 @@ pid_t SpawnDaemon(
         fake_criu.string(),
         "--criu-ns-bin",
         fake_criu_ns.string(),
-        "--ready-file",
-        ready_file.string(),
     };
+    if (worker_timeout_seconds > 0) {
+      argv.push_back("--worker-timeout-seconds");
+      argv.push_back(std::to_string(worker_timeout_seconds));
+    }
+    argv.push_back("--ready-file");
+    argv.push_back(ready_file.string());
     std::vector<char*> exec_argv;
     for (const std::string& token : argv) {
       exec_argv.push_back(const_cast<char*>(token.c_str()));
@@ -178,6 +186,28 @@ pid_t SpawnDaemon(
     _exit(127);
   }
   return child;
+}
+
+void SendAndClose(const fs::path& socket_path, const snapshotd::Message& request) {
+  const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    throw std::runtime_error("socket(AF_UNIX) failed");
+  }
+
+  sockaddr_un address {};
+  address.sun_family = AF_UNIX;
+  const std::string socket_path_string = socket_path.string();
+  if (socket_path_string.size() >= sizeof(address.sun_path)) {
+    close(fd);
+    throw std::runtime_error("socket path too long");
+  }
+  std::snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path_string.c_str());
+  if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    close(fd);
+    throw std::runtime_error("connect failed");
+  }
+  snapshotd::SendMessage(fd, request);
+  close(fd);
 }
 
 void WaitForPath(const fs::path& path, std::chrono::milliseconds timeout) {
@@ -198,6 +228,15 @@ void KillAndWait(pid_t pid) {
   kill(pid, SIGTERM);
   int status = 0;
   waitpid(pid, &status, 0);
+}
+
+void BestEffortTerminate(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  // Managed jobs and restored processes are not children of the test process,
+  // so waitpid() would only report ECHILD here.
+  (void)!kill(pid, SIGTERM);
 }
 
 std::size_t CountNonStandardFds(pid_t pid) {
@@ -242,6 +281,7 @@ void TestDaemonFlowAndMaliciousInputs() {
       "call_log='" + call_log.string() + "'\n"
       "env_log='" + env_log.string() + "'\n"
       "{\n"
+      "  printf 'argv0=%s\\n' \"$0\"\n"
       "  for arg in \"$@\"; do printf 'arg=%s\\n' \"$arg\"; done\n"
       "  printf '%s\\n' '---'\n"
       "} >> \"$call_log\"\n"
@@ -323,6 +363,18 @@ void TestDaemonFlowAndMaliciousInputs() {
          (temp_dir / "missing-command").string()});
     Expect(missing_exec_result.exit_code != 0, "missing executable should fail");
 
+    const fs::path setuid_script = temp_dir / "setuid-script.sh";
+    WriteExecutable(setuid_script, "#!/usr/bin/env bash\nexit 0\n");
+    if (chmod(setuid_script.c_str(), 04755) != 0) {
+      throw std::runtime_error("chmod 04755 failed for " + setuid_script.string());
+    }
+    CommandResult setuid_run_result = RunCommand(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "run", "--", setuid_script.string()});
+    Expect(setuid_run_result.exit_code != 0, "setuid executable should be rejected");
+    Expect(
+        setuid_run_result.stderr_text.find("setuid or setgid") != std::string::npos,
+        "setuid rejection should explain why the executable is unsafe");
+
     snapshotd::Client client(socket_path.string());
     snapshotd::Message bad_request;
     bad_request.command = "checkpoint";
@@ -400,13 +452,22 @@ void TestDaemonFlowAndMaliciousInputs() {
     Expect(env_log_text.find("CRIU_CONFIG_FILE=") == std::string::npos,
            "worker should clear CRIU_CONFIG_FILE");
 
-    snapshotd::Message restore_request;
-    restore_request.command = "restore";
-    restore_request.AddField("job_id", job_id);
-    restore_request.AddField("namespace_restore", "0");
-    const snapshotd::Message restore_response = client.Request(restore_request);
-    Expect(restore_response.command == "ok", "restore command failed");
-    restored_pid = static_cast<pid_t>(std::stol(restore_response.Get("restored_pid")));
+    snapshotd::Message dropped_status_request;
+    dropped_status_request.command = "status";
+    dropped_status_request.AddField("job_id", job_id);
+    SendAndClose(socket_path, dropped_status_request);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    CommandResult status_after_disconnect =
+        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "status", job_id});
+    Expect(status_after_disconnect.exit_code == 0,
+           "daemon should survive a client disconnect during response write");
+
+    CommandResult restore_result =
+        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "restore", job_id});
+    Expect(restore_result.exit_code == 0, "restore command failed: " + restore_result.stderr_text);
+    const auto restore_map = ParseOutputMap(restore_result.stdout_text);
+    restored_pid = static_cast<pid_t>(std::stol(restore_map.at("restored_pid")));
     Expect(restored_pid > 1, "restore pidfile was not propagated");
 
     CommandResult status_after_restore =
@@ -425,16 +486,16 @@ void TestDaemonFlowAndMaliciousInputs() {
     const std::string call_log_after_restore = snapshotd::ReadTextFile(call_log);
     Expect(call_log_after_restore.find("arg=restore") != std::string::npos,
            "restore call missing");
+    Expect(call_log_after_restore.find("argv0=" + fake_criu_ns.string()) == std::string::npos,
+           "default checkpoint/restore flow should not invoke criu-ns");
     Expect(call_log_after_restore.find("arg=" + std::to_string(restored_pid)) != std::string::npos,
            "post-restore checkpoint did not target restored pid");
   } catch (...) {
     if (restored_pid > 1) {
-      kill(restored_pid, SIGTERM);
-      waitpid(restored_pid, nullptr, 0);
+      BestEffortTerminate(restored_pid);
     }
     if (job_pid > 1) {
-      kill(job_pid, SIGTERM);
-      waitpid(job_pid, nullptr, 0);
+      BestEffortTerminate(job_pid);
     }
     KillAndWait(daemon_pid);
     snapshotd::RemoveTree(temp_dir);
@@ -442,12 +503,92 @@ void TestDaemonFlowAndMaliciousInputs() {
   }
 
   if (restored_pid > 1) {
-    kill(restored_pid, SIGTERM);
-    waitpid(restored_pid, nullptr, 0);
+    BestEffortTerminate(restored_pid);
   }
   if (job_pid > 1) {
-    kill(job_pid, SIGTERM);
-    waitpid(job_pid, nullptr, 0);
+    BestEffortTerminate(job_pid);
+  }
+  KillAndWait(daemon_pid);
+  snapshotd::RemoveTree(temp_dir);
+}
+
+void TestWorkerTimeoutCancelsHungOperation() {
+  const fs::path temp_dir = MakeTempDir("timeoutit");
+  const fs::path socket_path = temp_dir / "snapshotd.sock";
+  const fs::path state_dir = temp_dir / "state";
+  const fs::path ready_file = temp_dir / "ready";
+  const fs::path fake_criu = temp_dir / "fake-criu-timeout.sh";
+  const fs::path fake_criu_ns = temp_dir / "criu-ns";
+  const fs::path daemon_bin = Runfile("src/csrc/snapshotd");
+  const fs::path worker_bin = Runfile("src/csrc/snapshot-worker");
+  const fs::path ctl_bin = Runfile("src/csrc/snapshotctl");
+
+  WriteExecutable(
+      fake_criu,
+      "#!/usr/bin/env bash\n"
+      "set -eu\n"
+      "mode=\"${1:-}\"\n"
+      "if [ \"$mode\" = 'dump' ]; then\n"
+      "  sleep 5\n"
+      "fi\n"
+      "logfile=''\n"
+      "while [ \"$#\" -gt 0 ]; do\n"
+      "  if [ \"$1\" = '--log-file' ]; then\n"
+      "    logfile=\"$2\"\n"
+      "    shift 2\n"
+      "    continue\n"
+      "  fi\n"
+      "  shift\n"
+      "done\n"
+      "if [ -n \"$logfile\" ]; then\n"
+      "  mkdir -p \"$(dirname \"$logfile\")\"\n"
+      "  printf '%s\\n' 'timeout log' > \"$logfile\"\n"
+      "fi\n");
+  WriteExecutable(fake_criu_ns, snapshotd::ReadTextFile(fake_criu));
+
+  const pid_t daemon_pid = SpawnDaemon(
+      daemon_bin,
+      socket_path,
+      state_dir,
+      worker_bin,
+      fake_criu,
+      fake_criu_ns,
+      ready_file,
+      {},
+      1);
+  pid_t job_pid = 0;
+  try {
+    WaitForPath(ready_file, std::chrono::milliseconds(5000));
+    WaitForPath(socket_path, std::chrono::milliseconds(5000));
+
+    CommandResult run_result = RunCommand(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "run", "--", "/bin/sleep", "30"});
+    Expect(run_result.exit_code == 0, "run command failed");
+    const auto run_map = ParseOutputMap(run_result.stdout_text);
+    const std::string job_id = run_map.at("job_id");
+    job_pid = static_cast<pid_t>(std::stol(run_map.at("pid")));
+
+    CommandResult checkpoint_result =
+        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "checkpoint", job_id});
+    Expect(checkpoint_result.exit_code != 0, "hung checkpoint should fail after timeout");
+    Expect(
+        checkpoint_result.stderr_text.find("timed out") != std::string::npos,
+        "checkpoint timeout should be reported to the caller");
+
+    CommandResult status_result =
+        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "status", job_id});
+    Expect(status_result.exit_code == 0, "daemon should remain responsive after worker timeout");
+  } catch (...) {
+    if (job_pid > 1) {
+      BestEffortTerminate(job_pid);
+    }
+    KillAndWait(daemon_pid);
+    snapshotd::RemoveTree(temp_dir);
+    throw;
+  }
+
+  if (job_pid > 1) {
+    BestEffortTerminate(job_pid);
   }
   KillAndWait(daemon_pid);
   snapshotd::RemoveTree(temp_dir);
@@ -458,6 +599,7 @@ void TestDaemonFlowAndMaliciousInputs() {
 int main() {
   try {
     TestDaemonFlowAndMaliciousInputs();
+    TestWorkerTimeoutCancelsHungOperation();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << "\n";

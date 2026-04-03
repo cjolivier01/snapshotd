@@ -5,6 +5,7 @@
 #ifndef SNAPSHOT_CSRC_PROTOCOL_H_
 #define SNAPSHOT_CSRC_PROTOCOL_H_
 
+#include <cstddef>
 #include <sys/types.h>
 
 #include <string>
@@ -13,6 +14,15 @@
 #include <vector>
 
 namespace snapshotd {
+
+/**
+ * @brief Upper bound for one control-message payload.
+ *
+ * The daemon is root and accepts messages from any member of the socket group,
+ * so the framing layer must cap per-request memory growth before allocating a
+ * payload buffer.
+ */
+inline constexpr std::size_t kMaxControlMessageBytes = 64 * 1024;
 
 /** @brief Kernel-authenticated Unix-socket peer credentials. */
 struct PeerCred {

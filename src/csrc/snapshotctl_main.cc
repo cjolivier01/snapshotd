@@ -19,7 +19,8 @@ using snapshotd::Message;
 
 void PrintUsage() {
   std::cerr
-      << "usage: snapshotctl [--socket-path PATH] <run|status|checkpoint|restore> ...\n";
+      << "usage: snapshotctl [--socket-path PATH] <run|status|checkpoint|restore> ...\n"
+      << "  restore [--namespace-restore] <job-id> [checkpoint-id]\n";
 }
 
 void PrintResponse(const Message& response) {
@@ -98,11 +99,18 @@ int main(int argc, char** argv) {
     }
 
     if (command == "restore") {
+      bool namespace_restore = false;
+      while (index < argc && std::string(argv[index]) == "--namespace-restore") {
+        namespace_restore = true;
+        ++index;
+      }
       if (index >= argc) {
         throw std::runtime_error("restore requires <job-id>");
       }
       request.AddField("job_id", argv[index++]);
-      request.AddField("namespace_restore", "1");
+      if (namespace_restore) {
+        request.AddField("namespace_restore", "1");
+      }
       if (index < argc) {
         request.AddField("checkpoint_id", argv[index++]);
       }

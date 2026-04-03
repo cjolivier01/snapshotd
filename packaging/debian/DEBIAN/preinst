@@ -8,6 +8,11 @@ case "${1:-}" in
       echo "Install or provision CRIU separately at that path; this package intentionally does not depend on a distro criu package." >&2
       exit 1
     fi
+    if [ ! -x /usr/local/sbin/criu-ns ]; then
+      echo "snapshotd requires /usr/local/sbin/criu-ns to exist and be executable." >&2
+      echo "Install or provision the CRIU namespace helper separately at that path; this package intentionally does not depend on a distro criu package." >&2
+      exit 1
+    fi
     ;;
 esac
 

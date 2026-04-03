@@ -32,6 +32,7 @@ management layer is allowed to invoke CRIU.
 - Authenticates callers with `SO_PEERCRED`, not request-provided UID/PID fields.
 - Owns the policy boundary:
   - only accepts a small allowlisted API
+  - rejects oversized control messages before allocation
   - rejects unknown request fields
   - stores root-owned job and checkpoint metadata under `/var/lib/snapshotd`
   - maps each caller to managed jobs owned by that caller's kernel UID
@@ -77,7 +78,14 @@ Instead:
 4. That identity is not just a bare PID. The broker stores the process start-time
    token and revalidates it before privileged operations so a stale `job_id`
    cannot drift onto a reused PID.
-5. Later checkpoint/restore operations refer to `job_id`, not an arbitrary PID.
+5. Security validation is stricter than "same real UID":
+   - all real/effective/saved/fs UIDs must still match the caller
+   - all real/effective/saved/fs GIDs must still match the caller
+   - the target must not hold Linux capabilities
+6. The `run` path also rejects setuid/setgid or file-capability executables
+   before `execve()` so the broker never launches a managed job that gains
+   privilege on exec.
+7. Later checkpoint/restore operations refer to `job_id`, not an arbitrary PID.
 
 This removes the biggest abuse case: using a privileged CRIU wrapper to inspect,
 freeze, or restore another user's host process tree.
@@ -99,8 +107,10 @@ For that case a client can use a narrower broker request:
 That request is still not a raw privileged PID checkpoint primitive. The broker:
 
 - authenticates the caller with `SO_PEERCRED`
-- verifies that the requested PID belongs to the same kernel UID as the caller
-- captures the process identity token (`pid` + start time) before privileged use
+- verifies that the requested PID still matches the caller's unprivileged
+  uid/gid/capability state
+- captures and revalidates the process identity token (`pid` + start time)
+  before privileged use
 - creates a broker-owned managed job record for that process
 - stores the authoritative checkpoint only under `/var/lib/snapshotd`
 
@@ -161,11 +171,16 @@ Current fixed restore path:
   --shell-job -d
 ```
 
-For pid-namespace flows the worker swaps the base binary for `criu-ns` but still
-keeps the pid-namespace orchestration inside the broker boundary. The worker
-creates the pid namespace, runs CRIU restore there with broker-controlled
-images/work/log paths, discovers the restored local PID, and resolves that back
-to the host PID before writing the broker-owned `restore.pid`.
+The public `snapshotctl restore` path defaults to the host-PID restore shown
+above. Pid-namespace restore is still supported, but only as an explicit,
+broker-controlled mode for callers that specifically need it.
+
+For pid-namespace flows the worker swaps the base binary for `criu-ns` but
+still keeps the pid-namespace orchestration inside the broker boundary. The
+worker creates the pid namespace, runs CRIU restore there with
+broker-controlled images/work/log paths, discovers the restored local PID, and
+resolves that back to the host PID before writing the broker-owned
+`restore.pid`.
 
 The only passthrough CRIU options are a small allowlist needed by the runtime,
 for example:
@@ -203,6 +218,8 @@ The trust boundary is intentionally small:
 
 - The unprivileged CLI cannot ask for arbitrary root commands.
 - The daemon accepts only a small semantic API.
+- The control protocol is length-prefixed and capped, so one socket client
+  cannot force unbounded message-buffer allocation in the root daemon.
 - Unknown request fields are rejected, so there is no hidden unrestricted "raw
   CRIU args" tunnel.
 - Checkpoint identifiers and job identifiers are validated as simple safe IDs.
@@ -283,9 +300,10 @@ The Debian package installs:
 - a tmpfiles rule that creates `/var/lib/snapshotd`
 
 The package intentionally does not depend on a distro `criu` package. Instead,
-it assumes the site provisions CRIU separately at `/usr/local/sbin/criu`. The
-maintainer scripts fail the install if that executable is missing so the host
-does not silently end up with an installed-but-nonfunctional broker.
+it assumes the site provisions CRIU separately at `/usr/local/sbin/criu` and
+`/usr/local/sbin/criu-ns`. The maintainer scripts fail the install if either
+executable is missing so the host does not silently end up with an
+installed-but-nonfunctional broker.
 
 Post-install behavior:
 
