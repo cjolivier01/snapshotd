@@ -1,0 +1,5 @@
+sh_binary(
+    name = "build_deb",
+    srcs = ["build_deb.sh"],
+    visibility = ["//visibility:public"],
+)

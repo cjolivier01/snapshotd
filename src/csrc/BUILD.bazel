@@ -1,0 +1,49 @@
+package(default_visibility = ["//visibility:public"])
+
+COMMON_COPTS = [
+    "-std=c++17",
+    "-Wall",
+    "-Wextra",
+]
+
+cc_library(
+    name = "snapshotd_lib",
+    srcs = [
+        "client.cc",
+        "daemon.cc",
+        "protocol.cc",
+        "store.cc",
+        "util.cc",
+        "worker.cc",
+    ],
+    hdrs = [
+        "client.h",
+        "daemon.h",
+        "protocol.h",
+        "store.h",
+        "util.h",
+        "worker.h",
+    ],
+    copts = COMMON_COPTS,
+)
+
+cc_binary(
+    name = "snapshotctl",
+    srcs = ["snapshotctl_main.cc"],
+    copts = COMMON_COPTS,
+    deps = [":snapshotd_lib"],
+)
+
+cc_binary(
+    name = "snapshotd",
+    srcs = ["snapshotd_main.cc"],
+    copts = COMMON_COPTS,
+    deps = [":snapshotd_lib"],
+)
+
+cc_binary(
+    name = "snapshot-worker",
+    srcs = ["snapshot_worker_main.cc"],
+    copts = COMMON_COPTS,
+    deps = [":snapshotd_lib"],
+)

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  install|upgrade)
+    if [ ! -x /usr/local/sbin/criu ]; then
+      echo "snapshotd requires /usr/local/sbin/criu to exist and be executable." >&2
+      echo "Install or provision CRIU separately at that path; this package intentionally does not depend on a distro criu package." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+exit 0

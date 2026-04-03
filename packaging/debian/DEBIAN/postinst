@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+if ! getent group snapshot-users >/dev/null 2>&1; then
+  addgroup --system snapshot-users >/dev/null
+fi
+
+install -d -m 0755 -o root -g root /var/lib/snapshotd
+chmod 0755 /var/lib/snapshotd >/dev/null 2>&1 || true
+
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+  systemd-tmpfiles --create /usr/lib/tmpfiles.d/snapshotd.conf >/dev/null 2>&1 || true
+fi
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now snapshotd.socket >/dev/null 2>&1 || true
+fi
+
+exit 0

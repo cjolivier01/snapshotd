@@ -1,0 +1,30 @@
+package(default_visibility = ["//visibility:public"])
+
+COMMON_COPTS = [
+    "-std=c++17",
+    "-Wall",
+    "-Wextra",
+]
+
+cc_test(
+    name = "protocol_store_test",
+    srcs = ["protocol_store_test.cc"],
+    deps = [
+        "//src/csrc:snapshotd_lib",
+    ],
+    copts = COMMON_COPTS,
+)
+
+cc_test(
+    name = "daemon_integration_test",
+    srcs = ["daemon_integration_test.cc"],
+    data = [
+        "//src/csrc:snapshot-worker",
+        "//src/csrc:snapshotctl",
+        "//src/csrc:snapshotd",
+    ],
+    deps = [
+        "//src/csrc:snapshotd_lib",
+    ],
+    copts = COMMON_COPTS,
+)
