@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Entry points for the short-lived privileged CRIU worker.
+ */
+
 #ifndef SNAPSHOT_CSRC_WORKER_H_
 #define SNAPSHOT_CSRC_WORKER_H_
 
@@ -9,22 +13,37 @@
 
 namespace snapshotd {
 
+/** @brief Fully-resolved worker configuration for one dump or restore request. */
 struct WorkerConfig {
+  /** @brief Either `dump` or `restore`. */
   std::string operation;
+  /** @brief Root-owned state root for path confinement checks. */
   std::filesystem::path state_dir;
+  /** @brief Private job directory beneath @ref state_dir. */
   std::filesystem::path job_dir;
+  /** @brief Private checkpoint directory beneath @ref job_dir. */
   std::filesystem::path checkpoint_dir;
+  /** @brief Absolute path to the CRIU binary. */
   std::string criu_bin;
+  /** @brief Absolute path to the pid-namespace helper binary. */
   std::string criu_ns_bin;
+  /** @brief Target pid for dump operations. */
   pid_t pid = 0;
+  /** @brief Whether dump should occur from a broker-created pid namespace. */
   bool namespace_dump = false;
+  /** @brief Whether restore should occur inside a broker-created pid namespace. */
   bool namespace_restore = false;
+  /** @brief Small allowlisted set of extra CRIU flags forwarded by the daemon. */
   std::vector<std::string> extra_args;
 };
 
+/** @brief Construct the exact CRIU command used for a dump operation. */
 std::vector<std::string> BuildDumpCommand(const WorkerConfig& config);
+/** @brief Construct the exact CRIU command used for a restore operation. */
 std::vector<std::string> BuildRestoreCommand(const WorkerConfig& config);
+/** @brief Execute the requested dump or restore operation. */
 int RunWorker(const WorkerConfig& config);
+/** @brief Parse worker CLI flags and invoke @ref RunWorker. */
 int RunWorkerMain(int argc, char** argv);
 
 }  // namespace snapshotd

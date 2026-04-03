@@ -1,3 +1,7 @@
+/** @file
+ *  @brief CLI entry point for the unprivileged snapshotd client.
+ */
+
 #include "src/csrc/client.h"
 
 #include <iostream>
@@ -19,6 +23,8 @@ void PrintUsage() {
 }
 
 void PrintResponse(const Message& response) {
+  // The CLI prints a stable key=value format so shell scripts can parse the
+  // control-plane responses without needing a JSON dependency.
   for (const auto& field : response.fields) {
     std::cout << field.first << "=" << field.second << "\n";
   }
@@ -70,6 +76,8 @@ int main(int argc, char** argv) {
       }
       const std::string executable =
           snapshotd::ResolveExecutable(argv[index], snapshotd::GetEnv("PATH"));
+      // The daemon requires an absolute executable path so the privileged side
+      // never performs PATH lookups on behalf of the caller.
       request.AddField("cwd", snapshotd::GetCurrentWorkingDirectory());
       request.AddField("arg", executable);
       ++index;
