@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Small wrapper that reports daemon startup failures on stderr.
+ */
+
 #include <iostream>
 #include <stdexcept>
 

@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Implementation of the synchronous control-socket client.
+ */
+
 #include "src/csrc/client.h"
 
 #include <sys/socket.h>
@@ -13,6 +17,8 @@ namespace snapshotd {
 Client::Client(std::string socket_path) : socket_path_(std::move(socket_path)) {}
 
 Message Client::Request(const Message& request) const {
+  // Each request uses a fresh Unix-domain socket so the CLI never needs to keep
+  // a long-lived privileged channel open.
   const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
     ThrowErrno("socket(AF_UNIX)");

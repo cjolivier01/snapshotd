@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Short-lived privileged worker that executes fixed CRIU commands.
+ */
+
 #include "src/csrc/worker.h"
 
 #include <fcntl.h>
@@ -59,6 +63,8 @@ void ValidateWorkerConfig(const WorkerConfig& config) {
       !config.checkpoint_dir.is_absolute()) {
     throw std::runtime_error("worker paths must be absolute");
   }
+  // Recreate the expected directory layout before touching CRIU so the worker
+  // never follows caller-controlled relative paths.
   EnsureDir(config.state_dir, 0755);
   EnsureDir(config.job_dir, 0700);
   EnsureDir(config.checkpoint_dir, 0700);
@@ -84,6 +90,8 @@ std::vector<char*> MakeArgv(const std::vector<std::string>& command) {
 }
 
 [[noreturn]] void ExecCommand(const std::vector<std::string>& command) {
+  // Privileged CRIU invocations run with a scrubbed environment so ambient
+  // variables such as CRIU_CONFIG_FILE cannot steer the worker unexpectedly.
   if (clearenv() != 0) {
     _exit(127);
   }
@@ -155,6 +163,8 @@ pid_t ResolveHostPidFromLocalPid(pid_t ns_init_host_pid, pid_t local_pid) {
   const auto deadline = std::chrono::steady_clock::now() + kNamespaceRestoreTimeout;
   while (std::chrono::steady_clock::now() < deadline) {
     for (pid_t host_pid : ReadChildPids(ns_init_host_pid)) {
+      // The namespace init process is the parent of the restored tree. Match on
+      // the innermost NSpid value to recover the host pid for bookkeeping.
       const std::vector<pid_t> nspid_values = ReadNSpidValues(host_pid);
       if (!nspid_values.empty() && nspid_values.back() == local_pid) {
         return host_pid;
@@ -243,6 +253,8 @@ void PrepareControllingTty() {
   if (openpty(&master_fd, &slave_fd, nullptr, nullptr, nullptr) != 0) {
     ThrowErrno("openpty");
   }
+  // CRIU expects a controlling TTY in several shell-job flows. When the worker
+  // is started without one, fabricate a private PTY pair just for setup.
   if (dup2(slave_fd, STDIN_FILENO) < 0) {
     ThrowErrno("dup2(slave tty)");
   }
@@ -311,6 +323,8 @@ int RunNamespaceRestoreInit(const WorkerConfig& config, int status_fd, const fs:
       ThrowErrno("fork");
     }
     if (criu_pid == 0) {
+      // The namespace init process becomes pid 1. It launches CRIU restore and
+      // later reports the restored local pid back to the host-side parent.
       ExecCommand(command);
     }
 
@@ -415,6 +429,8 @@ int RunNamespaceRestore(const WorkerConfig& config) {
   }
 
   close(status_pipe[1]);
+  // The parent stays in the host namespace and translates the restored local
+  // pid back into a host pid for the daemon's persistent metadata.
   const std::map<std::string, std::string> payload = ReadStatusPayload(status_pipe[0]);
   close(status_pipe[0]);
   const auto error_it = payload.find("error");

@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Shared filesystem, process, and string helpers for snapshotd.
+ */
+
 #include "src/csrc/util.h"
 
 #include <fcntl.h>

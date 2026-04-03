@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Filesystem-backed metadata store for jobs, checkpoints, and exports.
+ */
+
 #include "src/csrc/store.h"
 
 #include <unistd.h>
@@ -180,6 +184,8 @@ CheckpointRecord Store::CreateCheckpoint(const JobRecord& job) const {
   EnsureDir(CheckpointsDir(job.owner_uid, job.job_id), 0700);
   const fs::path checkpoint_dir =
       CheckpointDir(job.owner_uid, job.job_id, record.checkpoint_id);
+  // Restore authority stays in the private tree. User-readable exports are
+  // materialized separately by the daemon after the worker finishes.
   EnsureDir(checkpoint_dir / "images", 0700);
   EnsureDir(checkpoint_dir / "work", 0700);
   EnsureDir(checkpoint_dir / "logs", 0700);

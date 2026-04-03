@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Policy-enforcing privileged broker for managed checkpoint jobs.
+ */
+
 #include "src/csrc/daemon.h"
 
 #include <errno.h>
@@ -194,6 +198,8 @@ LaunchResult LaunchManagedJob(
       _exit(127);
     };
     if (geteuid() == 0) {
+      // Managed jobs run as the caller, even though the daemon itself is root.
+      // The worker later regains privilege only for the narrow CRIU operation.
       if (pwd != nullptr) {
         if (initgroups(pwd->pw_name, peer.gid) != 0) {
           fail(LaunchStage::kInitGroups, errno);
@@ -234,6 +240,8 @@ LaunchResult LaunchManagedJob(
   }
 
   close(error_pipe[1]);
+  // The post-fork start-time token is persisted alongside the pid so later
+  // privileged operations can reject stale job ids after PID reuse.
   const std::string start_time_ticks = ReadProcessStartTimeTicks(child);
   LaunchFailure failure {};
   const ssize_t count = read(error_pipe[0], &failure, sizeof(failure));
@@ -327,6 +335,8 @@ JobRecord CreatePidOwnedJob(Store* store, const PeerCred& peer, pid_t target_pid
   if (target_pid <= 1) {
     throw std::runtime_error("checkpoint pid must be > 1");
   }
+  // This is the narrow self-checkpoint bridge used by downstream runtimes. It
+  // still records a managed job and pins ownership to the connected peer uid.
   const ProcessIdentity identity = ReadProcessIdentity(target_pid);
   if (identity.uid != peer.uid) {
     throw std::runtime_error("checkpoint target belongs to another uid");
@@ -577,6 +587,8 @@ Message HandleRequest(
     if (job.state != "running") {
       throw std::runtime_error("cannot checkpoint a non-running managed job");
     }
+    // Revalidate pid + start_time before the privileged worker runs so a stale
+    // job id cannot drift onto a reused pid.
     CheckpointRecord checkpoint = store->CreateCheckpoint(job);
     store->SaveCheckpoint(job, checkpoint);
     const std::vector<std::string> extra_args =
@@ -741,6 +753,8 @@ int RunDaemon(const DaemonConfig& config) {
       ThrowErrno("accept");
     }
     try {
+      // Authorization is per-connection, derived from the kernel rather than
+      // any client-supplied uid/pid fields.
       const PeerCred peer = GetPeerCred(client_fd);
       const Message request = ReceiveMessage(client_fd);
       const Message response = HandleRequest(request, peer, config, &store);

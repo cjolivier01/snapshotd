@@ -1,3 +1,7 @@
+/** @file
+ *  @brief Control-message framing used by both the daemon and its clients.
+ */
+
 #include "src/csrc/protocol.h"
 
 #include <errno.h>
@@ -54,6 +58,8 @@ std::string EncodeMessage(const Message& message) {
   if (message.command.empty()) {
     throw std::runtime_error("message command may not be empty");
   }
+  // The wire format is a length-prefixed sequence of NUL-delimited tokens:
+  //   command\0key=value\0key=value\0
   std::string output;
   output.append(message.command);
   output.push_back('\0');
@@ -137,6 +143,8 @@ PeerCred GetPeerCred(int fd) {
 }
 
 void SendMessage(int fd, const Message& message) {
+  // Prefix the payload so the receiver can safely read one whole message from a
+  // stream socket without guessing message boundaries.
   const std::string payload = EncodeMessage(message);
   const std::uint32_t size = static_cast<std::uint32_t>(payload.size());
   WriteAll(fd, &size, sizeof(size));
