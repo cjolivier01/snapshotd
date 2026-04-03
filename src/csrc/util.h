@@ -8,6 +8,7 @@
 #include <sys/types.h>
 
 #include <filesystem>
+#include <cstdint>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -137,6 +138,8 @@ std::string PidToString(pid_t pid);
 void CopyTree(const std::filesystem::path& source, const std::filesystem::path& destination);
 /** @brief Recursively chown a directory tree. */
 void ChownTree(const std::filesystem::path& root, uid_t uid, gid_t gid);
+/** @brief Return the total size in bytes of all regular files under a tree. */
+std::uint64_t DirectoryTreeSizeBytes(const std::filesystem::path& root);
 
 }  // namespace snapshotd
 

@@ -21,6 +21,11 @@ That file controls daemon-owned runtime settings such as:
   criu_bin
   criu_ns_bin
   worker_timeout_seconds
+  max_checkpoint_age_seconds
+  min_keep_checkpoints_per_job
+  max_keep_checkpoints_per_job
+  max_bytes_per_user
+  max_bytes_total
 
 Socket settings remain in the systemd socket unit rather than the daemon
 config file.

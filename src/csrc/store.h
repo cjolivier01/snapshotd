@@ -7,8 +7,10 @@
 
 #include <sys/types.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace snapshotd {
 
@@ -33,6 +35,9 @@ struct CheckpointRecord {
   std::string job_id;
   std::string state;
   std::string created_at;
+  std::string last_restored_at;
+  std::string restore_count;
+  std::string size_bytes;
   std::string dump_log;
   std::string restore_log;
   std::string restored_pid;
@@ -95,6 +100,10 @@ class Store {
   void SaveJob(const JobRecord& job) const;
   /** @brief Load one job record owned by @p owner_uid. */
   JobRecord LoadJob(uid_t owner_uid, const std::string& job_id) const;
+  /** @brief Enumerate known caller UIDs with broker-owned state. */
+  std::vector<uid_t> ListUsers() const;
+  /** @brief Enumerate managed jobs for one caller UID. */
+  std::vector<JobRecord> ListJobs(uid_t owner_uid) const;
 
   /** @brief Create a fresh checkpoint record and private directory layout. */
   CheckpointRecord CreateCheckpoint(const JobRecord& job) const;
@@ -104,6 +113,10 @@ class Store {
   CheckpointRecord LoadCheckpoint(
       const JobRecord& job,
       const std::string& checkpoint_id) const;
+  /** @brief Enumerate checkpoints for one managed job. */
+  std::vector<CheckpointRecord> ListCheckpoints(const JobRecord& job) const;
+  /** @brief Remove a checkpoint from both the private and export trees. */
+  void RemoveCheckpoint(const JobRecord& job, const CheckpointRecord& checkpoint) const;
   /** @brief Pick an explicit checkpoint id, or fall back to the job's latest checkpoint. */
   std::string ResolveCheckpointId(
       const JobRecord& job,

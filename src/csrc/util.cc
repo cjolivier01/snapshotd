@@ -745,4 +745,31 @@ void ChownTree(const fs::path& root, uid_t uid, gid_t gid) {
   }
 }
 
+std::uint64_t DirectoryTreeSizeBytes(const fs::path& root) {
+  if (!PathExists(root)) {
+    return 0;
+  }
+  std::uint64_t total = 0;
+  std::error_code error;
+  fs::recursive_directory_iterator iterator(
+      root,
+      fs::directory_options::skip_permission_denied,
+      error);
+  if (error) {
+    throw std::runtime_error("failed to walk tree " + root.string() + ": " + error.message());
+  }
+  for (const auto& entry : iterator) {
+    std::error_code status_error;
+    if (!entry.is_regular_file(status_error) || status_error) {
+      continue;
+    }
+    const auto file_size = entry.file_size(status_error);
+    if (status_error) {
+      continue;
+    }
+    total += static_cast<std::uint64_t>(file_size);
+  }
+  return total;
+}
+
 }  // namespace snapshotd

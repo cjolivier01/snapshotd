@@ -20,11 +20,13 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <algorithm>
 #include <unordered_set>
 #include <vector>
 
@@ -105,6 +107,32 @@ void ApplyConfigEntry(
     if (config->worker_timeout_seconds <= 0) {
       throw std::runtime_error("worker timeout must be > 0 seconds");
     }
+    return;
+  }
+  if (key == "max_checkpoint_age_seconds") {
+    config->max_checkpoint_age_seconds = std::stoi(value);
+    return;
+  }
+  if (key == "min_keep_checkpoints_per_job") {
+    config->min_keep_checkpoints_per_job = std::stoi(value);
+    if (config->min_keep_checkpoints_per_job < 0) {
+      throw std::runtime_error("min keep checkpoints must be >= 0");
+    }
+    return;
+  }
+  if (key == "max_keep_checkpoints_per_job") {
+    config->max_keep_checkpoints_per_job = std::stoi(value);
+    if (config->max_keep_checkpoints_per_job < 0) {
+      throw std::runtime_error("max keep checkpoints must be >= 0");
+    }
+    return;
+  }
+  if (key == "max_bytes_per_user") {
+    config->max_bytes_per_user = static_cast<std::uint64_t>(std::stoull(value));
+    return;
+  }
+  if (key == "max_bytes_total") {
+    config->max_bytes_total = static_cast<std::uint64_t>(std::stoull(value));
     return;
   }
   throw std::runtime_error("unknown snapshotd config key in " + source + ": " + key);
@@ -704,6 +732,11 @@ DaemonConfig ParseArgs(int argc, char** argv) {
   config.criu_bin = "/usr/local/sbin/criu";
   config.criu_ns_bin = DefaultCriuNsPath(config.criu_bin);
   config.worker_timeout_seconds = 600;
+  config.max_checkpoint_age_seconds = 30 * 24 * 3600;
+  config.min_keep_checkpoints_per_job = 1;
+  config.max_keep_checkpoints_per_job = 5;
+  config.max_bytes_per_user = 0;
+  config.max_bytes_total = 0;
 
   std::string config_path;
   for (int index = 1; index < argc; ++index) {
@@ -747,13 +780,112 @@ DaemonConfig ParseArgs(int argc, char** argv) {
       if (config.worker_timeout_seconds <= 0) {
         throw std::runtime_error("worker timeout must be > 0 seconds");
       }
+    } else if (arg == "--max-checkpoint-age-seconds") {
+      config.max_checkpoint_age_seconds = std::stoi(require_value(arg));
+    } else if (arg == "--min-keep-checkpoints-per-job") {
+      config.min_keep_checkpoints_per_job = std::stoi(require_value(arg));
+      if (config.min_keep_checkpoints_per_job < 0) {
+        throw std::runtime_error("min keep checkpoints must be >= 0");
+      }
+    } else if (arg == "--max-keep-checkpoints-per-job") {
+      config.max_keep_checkpoints_per_job = std::stoi(require_value(arg));
+      if (config.max_keep_checkpoints_per_job < 0) {
+        throw std::runtime_error("max keep checkpoints must be >= 0");
+      }
+    } else if (arg == "--max-bytes-per-user") {
+      config.max_bytes_per_user =
+          static_cast<std::uint64_t>(std::stoull(require_value(arg)));
+    } else if (arg == "--max-bytes-total") {
+      config.max_bytes_total =
+          static_cast<std::uint64_t>(std::stoull(require_value(arg)));
     } else if (arg == "--ready-file") {
       config.ready_file = require_value(arg);
     } else {
       throw std::runtime_error("unknown daemon flag: " + arg);
     }
   }
+  if (config.max_keep_checkpoints_per_job > 0 &&
+      config.max_keep_checkpoints_per_job < config.min_keep_checkpoints_per_job) {
+    config.max_keep_checkpoints_per_job = config.min_keep_checkpoints_per_job;
+  }
   return config;
+}
+
+long long ParseIntegerString(const std::string& value) {
+  if (value.empty()) {
+    return 0;
+  }
+  return std::stoll(value);
+}
+
+std::uint64_t ParseUnsignedString(const std::string& value) {
+  if (value.empty()) {
+    return 0;
+  }
+  return static_cast<std::uint64_t>(std::stoull(value));
+}
+
+std::string CurrentTimestampString() {
+  return std::to_string(static_cast<long long>(std::time(nullptr)));
+}
+
+struct RetentionCandidate {
+  JobRecord job;
+  CheckpointRecord checkpoint;
+  long long created_at = 0;
+  long long last_restored_at = 0;
+  long long restore_count = 0;
+  std::uint64_t size_bytes = 0;
+  bool protected_checkpoint = false;
+  bool marked_for_removal = false;
+};
+
+std::uint64_t RefreshCheckpointSize(
+    const Store& store,
+    const JobRecord& job,
+    CheckpointRecord* checkpoint) {
+  const std::uint64_t size_bytes = DirectoryTreeSizeBytes(
+      store.CheckpointDir(job.owner_uid, job.job_id, checkpoint->checkpoint_id));
+  checkpoint->size_bytes = std::to_string(size_bytes);
+  return size_bytes;
+}
+
+void TouchCheckpointRestoreUsage(
+    const Store& store,
+    const JobRecord& job,
+    CheckpointRecord* checkpoint) {
+  const long long previous_count = ParseIntegerString(checkpoint->restore_count);
+  checkpoint->restore_count = std::to_string(std::max(0LL, previous_count) + 1);
+  checkpoint->last_restored_at = CurrentTimestampString();
+  RefreshCheckpointSize(store, job, checkpoint);
+}
+
+long long CandidateEvictionTime(const RetentionCandidate& candidate) {
+  if (candidate.last_restored_at > 0) {
+    return candidate.last_restored_at;
+  }
+  return 0;
+}
+
+bool CandidateEvictionLess(
+    const RetentionCandidate* left,
+    const RetentionCandidate* right) {
+  if (CandidateEvictionTime(*left) != CandidateEvictionTime(*right)) {
+    return CandidateEvictionTime(*left) < CandidateEvictionTime(*right);
+  }
+  if (left->restore_count != right->restore_count) {
+    return left->restore_count < right->restore_count;
+  }
+  if (left->size_bytes != right->size_bytes) {
+    return left->size_bytes > right->size_bytes;
+  }
+  if (left->created_at != right->created_at) {
+    return left->created_at < right->created_at;
+  }
+  if (left->job.job_id != right->job.job_id) {
+    return left->job.job_id < right->job.job_id;
+  }
+  return left->checkpoint.checkpoint_id < right->checkpoint.checkpoint_id;
 }
 
 }  // namespace
@@ -825,6 +957,7 @@ Message HandleRequest(
           std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "failed";
+      RefreshCheckpointSize(*store, job, &checkpoint);
       store->SaveCheckpoint(job, checkpoint);
       const fs::path export_dir = ExportCheckpointArtifacts(*store, job, checkpoint);
       RequestError request_error("checkpoint_failed", error.what());
@@ -835,10 +968,16 @@ Message HandleRequest(
       throw request_error;
     }
     checkpoint.state = "ready";
+    RefreshCheckpointSize(*store, job, &checkpoint);
     store->SaveCheckpoint(job, checkpoint);
     job.latest_checkpoint = checkpoint.checkpoint_id;
     store->SaveJob(job);
     const fs::path export_dir = ExportCheckpointArtifacts(*store, job, checkpoint);
+    try {
+      (void)PruneCheckpoints(config, store, job.job_id, checkpoint.checkpoint_id);
+    } catch (const std::exception& error) {
+      std::cerr << "snapshotd: checkpoint prune failed: " << error.what() << "\n";
+    }
     return CheckpointSuccessResponse(job, checkpoint, export_dir);
   }
 
@@ -863,6 +1002,7 @@ Message HandleRequest(
           std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "failed";
+      RefreshCheckpointSize(*store, job, &checkpoint);
       store->SaveCheckpoint(job, checkpoint);
       const fs::path export_dir = ExportCheckpointArtifacts(*store, job, checkpoint);
       RequestError request_error("checkpoint_failed", error.what());
@@ -873,10 +1013,16 @@ Message HandleRequest(
       throw request_error;
     }
     checkpoint.state = "ready";
+    RefreshCheckpointSize(*store, job, &checkpoint);
     store->SaveCheckpoint(job, checkpoint);
     job.latest_checkpoint = checkpoint.checkpoint_id;
     store->SaveJob(job);
     const fs::path export_dir = ExportCheckpointArtifacts(*store, job, checkpoint);
+    try {
+      (void)PruneCheckpoints(config, store, job.job_id, checkpoint.checkpoint_id);
+    } catch (const std::exception& error) {
+      std::cerr << "snapshotd: checkpoint prune failed: " << error.what() << "\n";
+    }
     return CheckpointSuccessResponse(job, checkpoint, export_dir);
   }
 
@@ -905,6 +1051,7 @@ Message HandleRequest(
           std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "restore-failed";
+      RefreshCheckpointSize(*store, job, &checkpoint);
       store->SaveCheckpoint(job, checkpoint);
       const fs::path export_dir = ExportCheckpointArtifacts(*store, job, checkpoint);
       RequestError request_error("restore_failed", error.what());
@@ -924,6 +1071,7 @@ Message HandleRequest(
       checkpoint.restored_pid.clear();
     }
     checkpoint.state = "restored";
+    TouchCheckpointRestoreUsage(*store, job, &checkpoint);
     store->SaveCheckpoint(job, checkpoint);
     const fs::path export_dir = ExportCheckpointArtifacts(*store, job, checkpoint);
 
@@ -933,10 +1081,196 @@ Message HandleRequest(
     response.AddField("checkpoint_id", checkpoint.checkpoint_id);
     response.AddField("restored_pid", checkpoint.restored_pid);
     response.AddField("restore_log", (export_dir / "logs" / "restore.log").string());
+    try {
+      (void)PruneCheckpoints(config, store, job.job_id, checkpoint.checkpoint_id);
+    } catch (const std::exception& error) {
+      std::cerr << "snapshotd: checkpoint prune failed: " << error.what() << "\n";
+    }
     return response;
   }
 
   throw std::runtime_error("unsupported request command: " + request.command);
+}
+
+int PruneCheckpoints(
+    const DaemonConfig& config,
+    Store* store,
+    const std::string& preserve_job_id,
+    const std::string& preserve_checkpoint_id) {
+  const long long now = static_cast<long long>(std::time(nullptr));
+  std::vector<RetentionCandidate> candidates;
+  candidates.reserve(32);
+
+  for (uid_t uid : store->ListUsers()) {
+    for (const JobRecord& job : store->ListJobs(uid)) {
+      std::vector<CheckpointRecord> checkpoints = store->ListCheckpoints(job);
+      if (checkpoints.empty()) {
+        continue;
+      }
+
+      std::unordered_set<std::string> protected_ids;
+      // The newest/default checkpoint for a job must survive routine cleanup so
+      // the broker always has a sane default restore target.
+      if (!job.latest_checkpoint.empty()) {
+        protected_ids.insert(job.latest_checkpoint);
+      }
+      // The checkpoint just produced or restored by the active request is also
+      // protected so opportunistic pruning never deletes the thing the caller
+      // was just handed back.
+      if (!preserve_job_id.empty() && !preserve_checkpoint_id.empty() &&
+          job.job_id == preserve_job_id) {
+        protected_ids.insert(preserve_checkpoint_id);
+      }
+
+      std::sort(
+          checkpoints.begin(),
+          checkpoints.end(),
+          [](const CheckpointRecord& left, const CheckpointRecord& right) {
+            const long long left_created = ParseIntegerString(left.created_at);
+            const long long right_created = ParseIntegerString(right.created_at);
+            if (left_created != right_created) {
+              return left_created > right_created;
+            }
+            return left.checkpoint_id > right.checkpoint_id;
+          });
+      for (const CheckpointRecord& checkpoint : checkpoints) {
+        if (static_cast<int>(protected_ids.size()) >= config.min_keep_checkpoints_per_job) {
+          break;
+        }
+        protected_ids.insert(checkpoint.checkpoint_id);
+      }
+
+      const std::size_t job_start = candidates.size();
+      for (CheckpointRecord checkpoint : checkpoints) {
+        RefreshCheckpointSize(*store, job, &checkpoint);
+        store->SaveCheckpoint(job, checkpoint);
+
+        RetentionCandidate candidate;
+        candidate.job = job;
+        candidate.checkpoint = checkpoint;
+        candidate.created_at = ParseIntegerString(checkpoint.created_at);
+        candidate.last_restored_at = ParseIntegerString(checkpoint.last_restored_at);
+        candidate.restore_count = ParseIntegerString(checkpoint.restore_count);
+        candidate.size_bytes = ParseUnsignedString(checkpoint.size_bytes);
+        candidate.protected_checkpoint =
+            protected_ids.find(checkpoint.checkpoint_id) != protected_ids.end();
+        candidates.push_back(candidate);
+      }
+
+      if (config.max_checkpoint_age_seconds > 0) {
+        // Age-based expiry runs before count and byte-budget enforcement so
+        // obviously stale checkpoints disappear first.
+        for (std::size_t index = job_start; index < candidates.size(); ++index) {
+          RetentionCandidate& candidate = candidates[index];
+          if (candidate.protected_checkpoint) {
+            continue;
+          }
+          if (candidate.created_at <= 0) {
+            continue;
+          }
+          if ((now - candidate.created_at) >= config.max_checkpoint_age_seconds) {
+            candidate.marked_for_removal = true;
+          }
+        }
+      }
+
+      if (config.max_keep_checkpoints_per_job > 0) {
+        std::vector<RetentionCandidate*> remaining_for_job;
+        remaining_for_job.reserve(checkpoints.size());
+        for (std::size_t index = job_start; index < candidates.size(); ++index) {
+          RetentionCandidate& candidate = candidates[index];
+          if (!candidate.marked_for_removal) {
+            remaining_for_job.push_back(&candidate);
+          }
+        }
+        if (static_cast<int>(remaining_for_job.size()) > config.max_keep_checkpoints_per_job) {
+          std::vector<RetentionCandidate*> eviction_pool;
+          eviction_pool.reserve(remaining_for_job.size());
+          for (RetentionCandidate* candidate : remaining_for_job) {
+            if (!candidate->protected_checkpoint) {
+              eviction_pool.push_back(candidate);
+            }
+          }
+          std::sort(
+              eviction_pool.begin(),
+              eviction_pool.end(),
+              [](const RetentionCandidate* left, const RetentionCandidate* right) {
+                return CandidateEvictionLess(left, right);
+              });
+          int over_limit =
+              static_cast<int>(remaining_for_job.size()) - config.max_keep_checkpoints_per_job;
+          for (RetentionCandidate* candidate : eviction_pool) {
+            if (over_limit <= 0) {
+              break;
+            }
+            if (candidate->marked_for_removal) {
+              continue;
+            }
+            candidate->marked_for_removal = true;
+            --over_limit;
+          }
+        }
+      }
+    }
+  }
+
+  auto apply_byte_budget = [&](std::uint64_t budget, uid_t owner_uid) {
+    if (budget == 0) {
+      return;
+    }
+    std::uint64_t total = 0;
+    std::vector<RetentionCandidate*> eviction_pool;
+    for (RetentionCandidate& candidate : candidates) {
+      if (candidate.marked_for_removal) {
+        continue;
+      }
+      if (owner_uid != static_cast<uid_t>(-1) && candidate.job.owner_uid != owner_uid) {
+        continue;
+      }
+      total += candidate.size_bytes;
+      if (!candidate.protected_checkpoint) {
+        eviction_pool.push_back(&candidate);
+      }
+    }
+    if (total <= budget) {
+      return;
+    }
+    // Budget pressure evicts the coldest non-protected checkpoints first using
+    // the same deterministic ordering as the count ceiling.
+    std::sort(
+        eviction_pool.begin(),
+        eviction_pool.end(),
+        [](const RetentionCandidate* left, const RetentionCandidate* right) {
+          return CandidateEvictionLess(left, right);
+        });
+    for (RetentionCandidate* candidate : eviction_pool) {
+      if (total <= budget) {
+        break;
+      }
+      if (candidate->marked_for_removal) {
+        continue;
+      }
+      candidate->marked_for_removal = true;
+      total -= candidate->size_bytes;
+    }
+  };
+
+  if (config.max_bytes_per_user > 0) {
+    for (uid_t uid : store->ListUsers()) {
+      apply_byte_budget(config.max_bytes_per_user, uid);
+    }
+  }
+  apply_byte_budget(config.max_bytes_total, static_cast<uid_t>(-1));
+
+  int removed = 0;
+  for (const RetentionCandidate& candidate : candidates) {
+    if (!candidate.marked_for_removal) {
+      continue;
+    }
+    store->RemoveCheckpoint(candidate.job, candidate.checkpoint);
+    ++removed;
+  }
+  return removed;
 }
 
 int RunDaemon(const DaemonConfig& config) {
