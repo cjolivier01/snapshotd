@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -195,7 +196,12 @@ void SendAndClose(const fs::path& socket_path, const snapshotd::Message& request
 
   sockaddr_un address {};
   address.sun_family = AF_UNIX;
-  std::snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path.c_str());
+  const std::string socket_path_string = socket_path.string();
+  if (socket_path_string.size() >= sizeof(address.sun_path)) {
+    close(fd);
+    throw std::runtime_error("socket path too long");
+  }
+  std::snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path_string.c_str());
   if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
     close(fd);
     throw std::runtime_error("connect failed");
@@ -222,6 +228,15 @@ void KillAndWait(pid_t pid) {
   kill(pid, SIGTERM);
   int status = 0;
   waitpid(pid, &status, 0);
+}
+
+void BestEffortTerminate(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  // Managed jobs and restored processes are not children of the test process,
+  // so waitpid() would only report ECHILD here.
+  (void)!kill(pid, SIGTERM);
 }
 
 std::size_t CountNonStandardFds(pid_t pid) {
@@ -477,12 +492,10 @@ void TestDaemonFlowAndMaliciousInputs() {
            "post-restore checkpoint did not target restored pid");
   } catch (...) {
     if (restored_pid > 1) {
-      kill(restored_pid, SIGTERM);
-      waitpid(restored_pid, nullptr, 0);
+      BestEffortTerminate(restored_pid);
     }
     if (job_pid > 1) {
-      kill(job_pid, SIGTERM);
-      waitpid(job_pid, nullptr, 0);
+      BestEffortTerminate(job_pid);
     }
     KillAndWait(daemon_pid);
     snapshotd::RemoveTree(temp_dir);
@@ -490,12 +503,10 @@ void TestDaemonFlowAndMaliciousInputs() {
   }
 
   if (restored_pid > 1) {
-    kill(restored_pid, SIGTERM);
-    waitpid(restored_pid, nullptr, 0);
+    BestEffortTerminate(restored_pid);
   }
   if (job_pid > 1) {
-    kill(job_pid, SIGTERM);
-    waitpid(job_pid, nullptr, 0);
+    BestEffortTerminate(job_pid);
   }
   KillAndWait(daemon_pid);
   snapshotd::RemoveTree(temp_dir);
@@ -569,8 +580,7 @@ void TestWorkerTimeoutCancelsHungOperation() {
     Expect(status_result.exit_code == 0, "daemon should remain responsive after worker timeout");
   } catch (...) {
     if (job_pid > 1) {
-      kill(job_pid, SIGTERM);
-      waitpid(job_pid, nullptr, 0);
+      BestEffortTerminate(job_pid);
     }
     KillAndWait(daemon_pid);
     snapshotd::RemoveTree(temp_dir);
@@ -578,8 +588,7 @@ void TestWorkerTimeoutCancelsHungOperation() {
   }
 
   if (job_pid > 1) {
-    kill(job_pid, SIGTERM);
-    waitpid(job_pid, nullptr, 0);
+    BestEffortTerminate(job_pid);
   }
   KillAndWait(daemon_pid);
   snapshotd::RemoveTree(temp_dir);

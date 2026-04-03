@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -120,7 +121,8 @@ enum class LaunchStage {
   kSetUid = 3,
   kStdio = 4,
   kChdir = 5,
-  kExecve = 6,
+  kOpenExecutable = 6,
+  kExecve = 7,
 };
 
 struct LaunchFailure {
@@ -152,6 +154,27 @@ void SetCloseOnExec(int fd) {
   }
   if (fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
     ThrowErrno("fcntl(F_SETFD)");
+  }
+}
+
+bool IsBenignResponseWriteError(const ErrnoRuntimeError& error) {
+  return error.error_code() == EPIPE ||
+         error.error_code() == ECONNRESET ||
+         error.error_code() == ENOTCONN;
+}
+
+void TrySendResponse(int client_fd, const Message& response) {
+  try {
+    SendMessage(client_fd, response);
+  } catch (const ErrnoRuntimeError& error) {
+    if (IsBenignResponseWriteError(error)) {
+      return;
+    }
+    std::cerr << "snapshotd: unexpected control-socket write failure: "
+              << error.what() << "\n";
+  } catch (const std::exception& error) {
+    std::cerr << "snapshotd: unexpected control-socket response failure: "
+              << error.what() << "\n";
   }
 }
 
@@ -240,7 +263,15 @@ LaunchResult LaunchManagedJob(
     };
     std::vector<char*> argvp = MakeArgv(argv);
     std::vector<char*> envp = MakeEnvp(env_storage);
-    execve(argv.front().c_str(), argvp.data(), envp.data());
+    int executable_fd = -1;
+    try {
+      executable_fd = OpenManagedExecutableForExec(argv.front());
+    } catch (const ErrnoRuntimeError& error) {
+      fail(LaunchStage::kOpenExecutable, error.error_code());
+    } catch (...) {
+      fail(LaunchStage::kOpenExecutable, EACCES);
+    }
+    execveat(executable_fd, "", argvp.data(), envp.data(), AT_EMPTY_PATH);
     fail(LaunchStage::kExecve, errno);
   }
 
@@ -275,8 +306,11 @@ LaunchResult LaunchManagedJob(
       case LaunchStage::kChdir:
         context = "chdir(" + cwd + ")";
         break;
+      case LaunchStage::kOpenExecutable:
+        context = "open managed executable " + argv.front();
+        break;
       case LaunchStage::kExecve:
-        context = "execve(" + argv.front() + ")";
+        context = "execveat(" + argv.front() + ")";
         break;
     }
     ThrowErrno(context);
@@ -849,20 +883,11 @@ int RunDaemon(const DaemonConfig& config) {
       const PeerCred peer = GetPeerCred(client_fd);
       const Message request = ReceiveMessage(client_fd);
       const Message response = HandleRequest(request, peer, config, &store);
-      try {
-        SendMessage(client_fd, response);
-      } catch (...) {
-      }
+      TrySendResponse(client_fd, response);
     } catch (const RequestError& error) {
-      try {
-        SendMessage(client_fd, ErrorResponse(error));
-      } catch (...) {
-      }
+      TrySendResponse(client_fd, ErrorResponse(error));
     } catch (const std::exception& error) {
-      try {
-        SendMessage(client_fd, ErrorResponse("request_failed", error.what()));
-      } catch (...) {
-      }
+      TrySendResponse(client_fd, ErrorResponse("request_failed", error.what()));
     }
     close(client_fd);
   }

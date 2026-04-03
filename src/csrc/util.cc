@@ -200,14 +200,90 @@ bool MatchesExpectedGidTuple(
   return true;
 }
 
+std::string ProcFdPath(int fd) {
+  return (fs::path("/proc/self/fd") / std::to_string(fd)).string();
+}
+
+void ValidateManagedExecutableFd(int fd, const std::string& path) {
+  struct stat executable_stat {};
+  if (fstat(fd, &executable_stat) != 0) {
+    ThrowErrno("fstat(" + path + ")");
+  }
+  if (!S_ISREG(executable_stat.st_mode)) {
+    throw std::runtime_error("managed job executable must be a regular file");
+  }
+  if ((executable_stat.st_mode & S_ISUID) != 0 || (executable_stat.st_mode & S_ISGID) != 0) {
+    throw std::runtime_error("managed job executable may not be setuid or setgid");
+  }
+
+  errno = 0;
+  const ssize_t capability_size =
+      getxattr(ProcFdPath(fd).c_str(), "security.capability", nullptr, 0);
+  if (capability_size >= 0) {
+    throw std::runtime_error("managed job executable may not have file capabilities");
+  }
+  if (errno == ENODATA || errno == ENOTSUP
+#ifdef ENOATTR
+      || errno == ENOATTR
+#endif
+  ) {
+    return;
+  }
+  ThrowErrno("getxattr(" + path + ", security.capability)");
+}
+
+bool ExecutableFdLooksLikeScript(int fd) {
+  // Shebang scripts need the executable fd to survive execveat() because the
+  // kernel passes the script to the interpreter via /dev/fd/N.
+  const int readable_fd = open(ProcFdPath(fd).c_str(), O_RDONLY | O_CLOEXEC);
+  if (readable_fd < 0) {
+    if (errno == EACCES || errno == EPERM) {
+      return false;
+    }
+    ThrowErrno("open(" + ProcFdPath(fd) + ")");
+  }
+
+  char header[2] = {'\0', '\0'};
+  ssize_t count = 0;
+  while (count < static_cast<ssize_t>(sizeof(header))) {
+    const ssize_t current =
+        read(readable_fd, header + count, sizeof(header) - static_cast<std::size_t>(count));
+    if (current < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      const int saved_errno = errno;
+      close(readable_fd);
+      errno = saved_errno;
+      ThrowErrno("read(" + ProcFdPath(fd) + ")");
+    }
+    if (current == 0) {
+      break;
+    }
+    count += current;
+  }
+  if (close(readable_fd) != 0) {
+    ThrowErrno("close(" + ProcFdPath(fd) + ")");
+  }
+  return count == static_cast<ssize_t>(sizeof(header)) &&
+         header[0] == '#' &&
+         header[1] == '!';
+}
+
 }  // namespace
 
 std::string ErrnoMessage(const std::string& context) {
   return context + ": " + std::string(strerror(errno));
 }
 
+ErrnoRuntimeError::ErrnoRuntimeError(std::string message, int error_code)
+    : std::runtime_error(std::move(message)), error_code_(error_code) {}
+
 [[noreturn]] void ThrowErrno(const std::string& context) {
-  throw std::runtime_error(ErrnoMessage(context));
+  const int error_code = errno;
+  throw ErrnoRuntimeError(
+      context + ": " + std::string(strerror(error_code)),
+      error_code);
 }
 
 std::string ReadTextFile(const fs::path& path) {
@@ -590,31 +666,37 @@ bool ProcessMatchesPeerSecurity(
 }
 
 void ValidateManagedExecutable(const std::string& path) {
+  const int executable_fd = OpenManagedExecutableForExec(path);
+  if (close(executable_fd) != 0) {
+    ThrowErrno("close(" + path + ")");
+  }
+}
+
+int OpenManagedExecutableForExec(const std::string& path) {
   if (!IsAbsolutePath(path)) {
     throw std::runtime_error("managed job executable must be absolute");
   }
 
-  struct stat executable_stat {};
-  if (stat(path.c_str(), &executable_stat) != 0) {
-    ThrowErrno("stat(" + path + ")");
+  const int executable_fd = open(path.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW);
+  if (executable_fd < 0) {
+    ThrowErrno("open(" + path + ")");
   }
-  if ((executable_stat.st_mode & S_ISUID) != 0 || (executable_stat.st_mode & S_ISGID) != 0) {
-    throw std::runtime_error("managed job executable may not be setuid or setgid");
+  try {
+    ValidateManagedExecutableFd(executable_fd, path);
+    if (ExecutableFdLooksLikeScript(executable_fd)) {
+      const int flags = fcntl(executable_fd, F_GETFD);
+      if (flags < 0) {
+        ThrowErrno("fcntl(F_GETFD)");
+      }
+      if (fcntl(executable_fd, F_SETFD, flags & ~FD_CLOEXEC) != 0) {
+        ThrowErrno("fcntl(F_SETFD)");
+      }
+    }
+  } catch (...) {
+    close(executable_fd);
+    throw;
   }
-
-  errno = 0;
-  const ssize_t capability_size = getxattr(path.c_str(), "security.capability", nullptr, 0);
-  if (capability_size >= 0) {
-    throw std::runtime_error("managed job executable may not have file capabilities");
-  }
-  if (errno == ENODATA || errno == ENOTSUP
-#ifdef ENOATTR
-      || errno == ENOATTR
-#endif
-  ) {
-    return;
-  }
-  ThrowErrno("getxattr(" + path + ", security.capability)");
+  return executable_fd;
 }
 
 std::string UidToString(uid_t uid) {

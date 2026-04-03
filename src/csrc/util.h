@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,17 @@ struct ProcessIdentity {
   uid_t uid = 0;
   gid_t gid = 0;
   std::string start_time_ticks;
+};
+
+/** @brief runtime_error that preserves the originating errno value. */
+class ErrnoRuntimeError : public std::runtime_error {
+ public:
+  ErrnoRuntimeError(std::string message, int error_code);
+
+  int error_code() const { return error_code_; }
+
+ private:
+  int error_code_ = 0;
 };
 
 /** @brief Return `context: strerror(errno)` using the current errno value. */
@@ -112,6 +124,11 @@ bool ProcessMatchesPeerSecurity(
  * exec, such as setuid/setgid or file-capability binaries.
  */
 void ValidateManagedExecutable(const std::string& path);
+/**
+ * @brief Open and validate the exact managed-job executable that will be
+ * executed, returning an fd suitable for execveat().
+ */
+int OpenManagedExecutableForExec(const std::string& path);
 /** @brief Convert uid/gid/pid values into decimal strings. */
 std::string UidToString(uid_t uid);
 std::string GidToString(gid_t gid);
