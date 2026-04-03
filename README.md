@@ -77,6 +77,17 @@ Build the Debian package:
 bazel build //:snapshotd_deb
 ```
 
+There is also a small top-level `Makefile` for common workflows:
+
+```bash
+make
+make debug
+make release
+make install
+make clean
+make distclean
+```
+
 ## Test
 
 Run the C++ test suite:
@@ -94,6 +105,12 @@ Build the package first:
 
 ```bash
 bazel build //:snapshotd_deb
+```
+
+Or use the Makefile wrapper:
+
+```bash
+make install
 ```
 
 Then install it. Copying the `.deb` out of Bazel's output tree avoids `_apt`
