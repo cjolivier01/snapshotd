@@ -132,6 +132,7 @@ The package installs:
 - `/usr/bin/snapshotctl`
 - `/usr/libexec/snapshotd/snapshotd`
 - `/usr/libexec/snapshotd/snapshot-worker`
+- `/etc/snapshotd/snapshotd.conf`
 - `snapshotd.socket`
 - `snapshotd.service`
 
@@ -140,6 +141,20 @@ Post-install, the package:
 - creates the `snapshot-users` system group if needed
 - creates `/var/lib/snapshotd`
 - enables and starts `snapshotd.socket`
+
+The packaged daemon reads its runtime configuration from:
+
+- `/etc/snapshotd/snapshotd.conf`
+
+That file controls daemon-owned settings such as:
+
+- `state_dir`
+- `criu_bin`
+- `criu_ns_bin`
+- `worker_timeout_seconds`
+
+Socket settings such as `/run/snapshotd.sock` and the `snapshot-users` group
+remain systemd socket-unit settings, not daemon config-file settings.
 
 To allow a user to access the broker socket:
 

@@ -30,12 +30,19 @@ management layer is allowed to invoke CRIU.
 - Installed at `/usr/libexec/snapshotd/snapshotd`.
 - Activated only through `/run/snapshotd.sock`.
 - Authenticates callers with `SO_PEERCRED`, not request-provided UID/PID fields.
+- In packaged installs, reads daemon-owned runtime defaults from
+  `/etc/snapshotd/snapshotd.conf`.
 - Owns the policy boundary:
   - only accepts a small allowlisted API
   - rejects oversized control messages before allocation
   - rejects unknown request fields
   - stores root-owned job and checkpoint metadata under `/var/lib/snapshotd`
   - maps each caller to managed jobs owned by that caller's kernel UID
+
+The packaged service still keeps socket activation in systemd. The daemon
+config file is for broker-owned runtime settings such as state paths, CRIU
+paths, and worker timeouts, while socket path/mode/group stay in
+`snapshotd.socket`.
 
 ### `snapshot-worker`
 

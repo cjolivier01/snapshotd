@@ -6,7 +6,7 @@ Requires=snapshotd.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/libexec/snapshotd/snapshotd --state-dir /var/lib/snapshotd --worker-path /usr/libexec/snapshotd/snapshot-worker --criu-bin /usr/local/sbin/criu --criu-ns-bin /usr/local/sbin/criu-ns
+ExecStart=/usr/libexec/snapshotd/snapshotd --config /etc/snapshotd/snapshotd.conf --worker-path /usr/libexec/snapshotd/snapshot-worker
 
 [Install]
 WantedBy=multi-user.target
