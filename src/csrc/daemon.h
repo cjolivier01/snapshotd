@@ -5,6 +5,7 @@
 #ifndef SNAPSHOT_CSRC_DAEMON_H_
 #define SNAPSHOT_CSRC_DAEMON_H_
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -27,6 +28,16 @@ struct DaemonConfig {
   std::string criu_ns_bin;
   /** @brief Upper bound for one worker invocation before the daemon cancels it. */
   int worker_timeout_seconds = 600;
+  /** @brief Age limit for checkpoints; values <= 0 disable age-based pruning. */
+  int max_checkpoint_age_seconds = 30 * 24 * 3600;
+  /** @brief Minimum number of checkpoints to keep per job. */
+  int min_keep_checkpoints_per_job = 1;
+  /** @brief Maximum number of checkpoints to keep per job. */
+  int max_keep_checkpoints_per_job = 5;
+  /** @brief Per-user authoritative checkpoint byte budget; 0 disables it. */
+  std::uint64_t max_bytes_per_user = 0;
+  /** @brief Global authoritative checkpoint byte budget; 0 disables it. */
+  std::uint64_t max_bytes_total = 0;
   /** @brief Optional file touched once the daemon is listening, used by tests. */
   std::string ready_file;
 };
@@ -45,6 +56,12 @@ Message HandleRequest(
     const PeerCred& peer,
     const DaemonConfig& config,
     Store* store);
+/** @brief Apply retention and space-budget pruning to persisted checkpoints. */
+int PruneCheckpoints(
+    const DaemonConfig& config,
+    Store* store,
+    const std::string& preserve_job_id = "",
+    const std::string& preserve_checkpoint_id = "");
 
 /** @brief Run the daemon event loop until shutdown. */
 int RunDaemon(const DaemonConfig& config);

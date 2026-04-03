@@ -611,12 +611,116 @@ void TestWorkerTimeoutCancelsHungOperation() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+void TestDaemonPrunesOlderCheckpointsAfterNewDump() {
+  const fs::path temp_dir = MakeTempDir("pruneit");
+  const fs::path socket_path = temp_dir / "snapshotd.sock";
+  const fs::path state_dir = temp_dir / "state";
+  const fs::path ready_file = temp_dir / "ready";
+  const fs::path config_path = temp_dir / "snapshotd.conf";
+  const fs::path fake_criu = temp_dir / "fake-criu-prune.sh";
+  const fs::path fake_criu_ns = temp_dir / "criu-ns";
+  const fs::path daemon_bin = Runfile("src/csrc/snapshotd");
+  const fs::path worker_bin = Runfile("src/csrc/snapshot-worker");
+  const fs::path ctl_bin = Runfile("src/csrc/snapshotctl");
+
+  WriteExecutable(
+      fake_criu,
+      "#!/usr/bin/env bash\n"
+      "set -eu\n"
+      "mode=\"${1:-}\"\n"
+      "logfile=''\n"
+      "while [ \"$#\" -gt 0 ]; do\n"
+      "  if [ \"$1\" = '--log-file' ]; then\n"
+      "    logfile=\"$2\"\n"
+      "    shift 2\n"
+      "    continue\n"
+      "  fi\n"
+      "  shift\n"
+      "done\n"
+      "if [ -n \"$logfile\" ]; then\n"
+      "  mkdir -p \"$(dirname \"$logfile\")\"\n"
+      "  printf '%s\\n' 'prune log' > \"$logfile\"\n"
+      "fi\n"
+      "if [ \"$mode\" = 'restore' ]; then\n"
+      "  sleep 60 &\n"
+      "fi\n");
+  WriteExecutable(fake_criu_ns, snapshotd::ReadTextFile(fake_criu));
+  snapshotd::WriteTextFile(
+      config_path,
+      "state_dir=" + state_dir.string() + "\n"
+      "criu_bin=" + fake_criu.string() + "\n"
+      "criu_ns_bin=" + fake_criu_ns.string() + "\n"
+      "worker_timeout_seconds=5\n"
+      "min_keep_checkpoints_per_job=1\n"
+      "max_keep_checkpoints_per_job=1\n"
+      "max_checkpoint_age_seconds=0\n",
+      0644,
+      0700);
+
+  const pid_t daemon_pid = SpawnDaemon(
+      daemon_bin,
+      socket_path,
+      state_dir,
+      worker_bin,
+      fake_criu,
+      fake_criu_ns,
+      ready_file,
+      {},
+      0,
+      config_path);
+  pid_t job_pid = 0;
+  try {
+    WaitForPath(ready_file, std::chrono::milliseconds(5000));
+    WaitForPath(socket_path, std::chrono::milliseconds(5000));
+
+    CommandResult run_result = RunCommand(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "run", "--", "/bin/sleep", "30"});
+    Expect(run_result.exit_code == 0, "run command failed");
+    const auto run_map = ParseOutputMap(run_result.stdout_text);
+    const std::string job_id = run_map.at("job_id");
+    job_pid = static_cast<pid_t>(std::stol(run_map.at("pid")));
+
+    CommandResult first_checkpoint = RunCommand(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "checkpoint", job_id});
+    Expect(first_checkpoint.exit_code == 0, "first checkpoint failed");
+    const auto first_map = ParseOutputMap(first_checkpoint.stdout_text);
+    const std::string first_checkpoint_id = first_map.at("checkpoint_id");
+
+    CommandResult second_checkpoint = RunCommand(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "checkpoint", job_id});
+    Expect(second_checkpoint.exit_code == 0, "second checkpoint failed");
+    const auto second_map = ParseOutputMap(second_checkpoint.stdout_text);
+    const std::string second_checkpoint_id = second_map.at("checkpoint_id");
+
+    const fs::path checkpoints_dir =
+        state_dir / snapshotd::UidToString(getuid()) / "jobs" / job_id / "checkpoints";
+    Expect(!snapshotd::PathExists(checkpoints_dir / first_checkpoint_id),
+           "older checkpoint should be pruned after newer dump");
+    Expect(snapshotd::PathExists(checkpoints_dir / second_checkpoint_id),
+           "latest checkpoint should remain after pruning");
+  } catch (...) {
+    if (job_pid > 1) {
+      BestEffortTerminate(job_pid);
+    }
+    KillAndWait(daemon_pid);
+    snapshotd::RemoveTree(temp_dir);
+    throw;
+  }
+
+  if (job_pid > 1) {
+    BestEffortTerminate(job_pid);
+  }
+  KillAndWait(daemon_pid);
+  snapshotd::RemoveTree(temp_dir);
+}
+
 }  // namespace
 
 int main() {
   try {
     TestDaemonFlowAndMaliciousInputs();
     TestWorkerTimeoutCancelsHungOperation();
+    TestDaemonPrunesOlderCheckpointsAfterNewDump();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << "\n";
