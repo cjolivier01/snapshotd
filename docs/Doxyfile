@@ -55,6 +55,7 @@ FILE_PATTERNS          = *.dox \
                          *.cc
 RECURSIVE              = YES
 EXCLUDE_PATTERNS       = */build/* \
+                         */docs/fallback/* \
                          */bazel-*/*
 IMAGE_PATH             = docs
 SOURCE_BROWSER         = YES

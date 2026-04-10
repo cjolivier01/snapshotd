@@ -1,10 +1,14 @@
 filegroup(
     name = "docs_inputs",
     srcs = [
+        "Makefile",
         "README.md",
         "docs/Doxyfile",
         "docs/design-reference.dox",
         "docs/doxygen-main.dox",
+        "docs/fallback/design-reference.md",
+        "docs/fallback/index.md",
+        "docs/fallback/it-review-guide.md",
         "docs/generate_docs.sh",
         "docs/it-review-guide.dox",
         "docs/safe-root-criu-broker-design.md",

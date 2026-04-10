@@ -2,12 +2,6 @@
 set -euo pipefail
 
 workspace_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
-docs_script="${workspace_root}/docs/generate_docs.sh"
-
-if [[ ! -x "$docs_script" ]]; then
-  echo "docs generator script is not executable: $docs_script" >&2
-  exit 1
-fi
 
 run_docs_check() {
   local mode="$1"
@@ -15,7 +9,8 @@ run_docs_check() {
 
   rm -rf "$out_dir"
   mkdir -p "$out_dir"
-  "$docs_script" --tool "$mode" --source-root "$workspace_root" --output-root "$out_dir"
+  make -C "$workspace_root" docs DOCS_TOOL="$mode" DOCS_OUTPUT_ROOT="$out_dir" \
+    DOCS_HTML_INDEX="$out_dir/site/index.html" >/dev/null
   test -f "$out_dir/site/index.html"
   grep -qi "snapshotd" "$out_dir/site/index.html"
 }
@@ -47,4 +42,6 @@ fi
 if [[ "$have_fallback" -eq 1 ]]; then
   run_docs_check "clang-doc" "$temp_root/clang-doc"
   test -f "$temp_root/clang-doc/site/api/index.html"
+  test -f "$temp_root/clang-doc/site/it-review-guide.html"
+  test -f "$temp_root/clang-doc/site/design-reference.html"
 fi

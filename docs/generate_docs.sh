@@ -50,6 +50,13 @@ have_tool() {
   command -v "$1" >/dev/null 2>&1
 }
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
 pick_tool() {
   case "$tool" in
     auto)
@@ -92,10 +99,10 @@ generate_with_doxygen() {
 
   cp "$repo_root/docs/Doxyfile" "$temp_doxy"
   cat >>"$temp_doxy" <<EOF
-OUTPUT_DIRECTORY = $output_root
+OUTPUT_DIRECTORY = "$output_root"
 HTML_OUTPUT = site
-INPUT = $repo_root/README.md $repo_root/docs $repo_root/src/csrc
-IMAGE_PATH = $repo_root/docs
+INPUT = "$repo_root/README.md" "$repo_root/docs" "$repo_root/src/csrc"
+IMAGE_PATH = "$repo_root/docs"
 EOF
 
   rm -rf "$site_dir"
@@ -105,10 +112,11 @@ EOF
 }
 
 generate_with_clang_doc_mkdocs() {
-  local clang_output mkdocs_src mkdocs_config
+  local clang_output mkdocs_src mkdocs_config compile_commands compiler_path
   clang_output="$output_root/clang-doc-md"
   mkdocs_src="$output_root/mkdocs-src"
   mkdocs_config="$output_root/mkdocs.yml"
+  compile_commands="$output_root/compile_commands.json"
 
   rm -rf "$clang_output" "$mkdocs_src" "$site_dir"
   mkdir -p "$clang_output" "$mkdocs_src/api" "$mkdocs_src/design"
@@ -119,31 +127,43 @@ generate_with_clang_doc_mkdocs() {
     exit 1
   fi
 
+  compiler_path="$(command -v clang++ || command -v c++ || command -v g++ || true)"
+  if [[ -z "$compiler_path" ]]; then
+    compiler_path="c++"
+  fi
+
+  {
+    printf '[\n'
+    for index in "${!source_files[@]}"; do
+      separator=","
+      if [[ "$index" -eq $((${#source_files[@]} - 1)) ]]; then
+        separator=""
+      fi
+      printf '  {"directory": "%s", "arguments": ["%s", "-xc++", "-std=c++17", "-I%s", "-c", "%s"], "file": "%s"}%s\n' \
+        "$(json_escape "$repo_root")" \
+        "$(json_escape "$compiler_path")" \
+        "$(json_escape "$repo_root")" \
+        "$(json_escape "${source_files[$index]}")" \
+        "$(json_escape "${source_files[$index]}")" \
+        "$separator"
+    done
+    printf ']\n'
+  } >"$compile_commands"
+
   echo "Generating API markdown with clang-doc"
   clang-doc \
     --doxygen \
     --format=md \
     --project-name=snapshotd \
     --output="$clang_output" \
-    --extra-arg-before=-xc++ \
-    --extra-arg-before=-std=c++17 \
-    --extra-arg-before=-I"$repo_root" \
+    -p "$output_root" \
     "${source_files[@]}"
 
   cp -R "$clang_output/." "$mkdocs_src/api/"
+  cp -R "$repo_root/docs/fallback/." "$mkdocs_src/"
   cp "$repo_root/README.md" "$mkdocs_src/overview.md"
   cp "$repo_root/docs/safe-root-criu-broker-design.md" \
     "$mkdocs_src/design/safe-root-criu-broker-design.md"
-
-  cat >"$mkdocs_src/index.md" <<'EOF'
-# snapshotd Documentation
-
-This site was generated with the `clang-doc` plus `mkdocs` fallback path.
-
-- [Overview](overview.md)
-- [Design](design/safe-root-criu-broker-design.md)
-- [API Reference](api/index.md)
-EOF
 
   cat >"$mkdocs_config" <<EOF
 site_name: snapshotd
@@ -152,6 +172,8 @@ site_dir: $site_dir
 use_directory_urls: false
 nav:
   - Home: index.md
+  - IT Review Guide: it-review-guide.md
+  - Design Reference: design-reference.md
   - Overview: overview.md
   - Design: design/safe-root-criu-broker-design.md
   - API: api/index.md

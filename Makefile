@@ -7,9 +7,10 @@ PACKAGE_NAME := snapshotd_0.1.0_amd64.deb
 PACKAGE_BAZEL := bazel-bin/$(PACKAGE_NAME)
 PACKAGE_TMP := /tmp/$(PACKAGE_NAME)
 PACKAGE_LOCAL := $(CURDIR)/$(PACKAGE_NAME)
-DOCS_SCRIPT := docs/generate_docs.sh
-DOCS_OUTPUT_ROOT := build/docs
-DOCS_HTML_INDEX := $(DOCS_OUTPUT_ROOT)/site/index.html
+DOCS_SCRIPT ?= docs/generate_docs.sh
+DOCS_TOOL ?= auto
+DOCS_OUTPUT_ROOT ?= build/docs
+DOCS_HTML_INDEX ?= $(DOCS_OUTPUT_ROOT)/site/index.html
 
 .DEFAULT_GOAL := help
 
@@ -53,7 +54,7 @@ deb:
 	@printf "%s\n" "Copied Debian package to $(PACKAGE_LOCAL)"
 
 docs:
-	$(DOCS_SCRIPT) --source-root "$(CURDIR)" --output-root "$(CURDIR)/$(DOCS_OUTPUT_ROOT)"
+	$(DOCS_SCRIPT) --tool "$(DOCS_TOOL)" --source-root "$(CURDIR)" --output-root "$(abspath $(DOCS_OUTPUT_ROOT))"
 	@printf "%s\n" "Generated HTML docs: $(DOCS_HTML_INDEX)"
 
 install: release
