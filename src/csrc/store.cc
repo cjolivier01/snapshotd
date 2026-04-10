@@ -1,5 +1,10 @@
 /** @file
  *  @brief Filesystem-backed metadata store for jobs, checkpoints, and exports.
+ *
+ *  @details
+ *  The store separates authoritative private restore inputs from user-readable
+ *  compatibility exports. That separation is relied upon by the daemon's
+ *  restore and retention policy.
  */
 
 #include "src/csrc/store.h"

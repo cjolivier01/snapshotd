@@ -1,5 +1,10 @@
 /** @file
  *  @brief CLI entry point for the unprivileged snapshotd client.
+ *
+ *  @details
+ *  The CLI deliberately stays thin: it resolves the initial executable path,
+ *  converts argv into protocol fields, and leaves all privileged policy
+ *  decisions to the daemon.
  */
 
 #include "src/csrc/client.h"

@@ -11,6 +11,19 @@
 
 namespace snapshotd {
 
+/**
+ * @defgroup client_api Control Client
+ * @brief Unprivileged client wrapper used by `snapshotctl` and tests.
+ *
+ * The client uses a fresh Unix-domain socket connection per request. That keeps
+ * the caller-side implementation simple and avoids long-lived privileged
+ * channels outside the broker itself.
+ *
+ * @see @ref protocol_api
+ * @see @ref safe_root_criu_broker_design
+ * @{
+ */
+
 /** @brief Synchronous client for one-request/one-response control operations. */
 class Client {
  public:
@@ -28,6 +41,8 @@ class Client {
  private:
   std::string socket_path_;
 };
+
+/** @} */
 
 }  // namespace snapshotd
 

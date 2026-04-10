@@ -13,6 +13,7 @@ cc_test(
         "//src/csrc:snapshotd_lib",
     ],
     copts = COMMON_COPTS,
+    linkopts = ["-lutil"],
 )
 
 cc_test(
@@ -27,4 +28,13 @@ cc_test(
         "//src/csrc:snapshotd_lib",
     ],
     copts = COMMON_COPTS,
+)
+
+sh_test(
+    name = "docs_tooling_test",
+    srcs = ["docs_tooling_test.sh"],
+    data = [
+        "//:docs_inputs",
+        "//src/csrc:docs_sources",
+    ],
 )

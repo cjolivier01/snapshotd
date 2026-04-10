@@ -1,5 +1,10 @@
 /** @file
  *  @brief Control-message framing used by both the daemon and its clients.
+ *
+ *  @details
+ *  This file implements the minimal wire protocol used on the privileged Unix
+ *  socket. The framing layer is intentionally small because every accepted byte
+ *  is part of the daemon's root attack surface.
  */
 
 #include "src/csrc/protocol.h"

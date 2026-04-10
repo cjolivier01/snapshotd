@@ -16,6 +16,18 @@
 
 namespace snapshotd {
 
+/**
+ * @defgroup util_api Shared Utilities
+ * @brief Filesystem, process, and validation helpers shared across the broker.
+ *
+ * These helpers carry several of the non-obvious security invariants of the
+ * project: PID reuse defense, executable privilege validation, path
+ * confinement, and broker-owned metadata serialization.
+ *
+ * @see @ref safe_root_criu_broker_design
+ * @{
+ */
+
 /** @brief Stable process identity token used to defend against PID reuse. */
 struct ProcessIdentity {
   pid_t pid = 0;
@@ -145,6 +157,8 @@ void SetTreePermissions(
     mode_t file_mode);
 /** @brief Return the total size in bytes of all regular files under a tree. */
 std::uint64_t DirectoryTreeSizeBytes(const std::filesystem::path& root);
+
+/** @} */
 
 }  // namespace snapshotd
 

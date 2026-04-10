@@ -13,6 +13,19 @@
 
 namespace snapshotd {
 
+/**
+ * @defgroup worker_api CRIU Worker
+ * @brief Short-lived worker that executes fixed CRIU dump/restore commands.
+ *
+ * The worker is intentionally not a public API surface. It receives
+ * fully-resolved, broker-owned paths from the daemon and converts them into a
+ * small fixed set of CRIU invocations.
+ *
+ * @see @ref daemon_api
+ * @see @ref safe_root_criu_broker_design
+ * @{
+ */
+
 /** @brief Fully-resolved worker configuration for one dump or restore request. */
 struct WorkerConfig {
   /** @brief Either `dump` or `restore`. */
@@ -45,6 +58,8 @@ std::vector<std::string> BuildRestoreCommand(const WorkerConfig& config);
 int RunWorker(const WorkerConfig& config);
 /** @brief Parse worker CLI flags and invoke @ref RunWorker. */
 int RunWorkerMain(int argc, char** argv);
+
+/** @} */
 
 }  // namespace snapshotd
 

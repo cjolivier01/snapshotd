@@ -1,5 +1,11 @@
 /** @file
  *  @brief Policy-enforcing privileged broker for managed checkpoint jobs.
+ *
+ *  @details
+ *  This file contains the project's primary trust boundary: peer
+ *  authentication, request validation, managed-job launch, privileged worker
+ *  invocation, and checkpoint retention. When IT or security reviewers ask
+ *  where the root policy is enforced, this is the first file to inspect.
  */
 
 #include "src/csrc/daemon.h"

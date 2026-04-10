@@ -6,10 +6,15 @@ BUILD_TARGETS := \
 PACKAGE_NAME := snapshotd_0.1.0_amd64.deb
 PACKAGE_BAZEL := bazel-bin/$(PACKAGE_NAME)
 PACKAGE_TMP := /tmp/$(PACKAGE_NAME)
+PACKAGE_LOCAL := $(CURDIR)/$(PACKAGE_NAME)
+DOCS_SCRIPT ?= docs/generate_docs.sh
+DOCS_TOOL ?= auto
+DOCS_OUTPUT_ROOT ?= build/docs
+DOCS_HTML_INDEX ?= $(DOCS_OUTPUT_ROOT)/site/index.html
 
 .DEFAULT_GOAL := help
 
-.PHONY: help debug release install clean distclean
+.PHONY: help debug release deb docs install clean distclean
 
 help:
 	@printf "\n"
@@ -20,6 +25,8 @@ help:
 	@printf "%s\n" "-----"
 	@printf "  %-12s %s\n" "debug" "Build snapshotd binaries and Debian package with Bazel debug settings (-c dbg)."
 	@printf "  %-12s %s\n" "release" "Build snapshotd binaries and Debian package with Bazel optimized settings (-c opt)."
+	@printf "  %-12s %s\n" "deb" "Build the release Debian package and copy it to the repository root."
+	@printf "  %-12s %s\n" "docs" "Generate docs under build/docs/site using Doxygen or a clang-doc+mkdocs fallback."
 	@printf "\n"
 	@printf "%s\n" "Install"
 	@printf "%s\n" "-------"
@@ -40,6 +47,15 @@ debug:
 
 release:
 	bazel build -c opt $(BUILD_TARGETS)
+
+deb:
+	bazel build -c opt //:snapshotd_deb
+	install -m 0644 $(PACKAGE_BAZEL) $(PACKAGE_LOCAL)
+	@printf "%s\n" "Copied Debian package to $(PACKAGE_LOCAL)"
+
+docs:
+	$(DOCS_SCRIPT) --tool "$(DOCS_TOOL)" --source-root "$(CURDIR)" --output-root "$(abspath $(DOCS_OUTPUT_ROOT))"
+	@printf "%s\n" "Generated HTML docs: $(DOCS_HTML_INDEX)"
 
 install: release
 	install -m 0644 $(PACKAGE_BAZEL) $(PACKAGE_TMP)

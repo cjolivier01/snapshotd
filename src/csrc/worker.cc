@@ -1,5 +1,10 @@
 /** @file
  *  @brief Short-lived privileged worker that executes fixed CRIU commands.
+ *
+ *  @details
+ *  The worker never accepts raw user-supplied image paths or free-form CRIU
+ *  argv. It receives fully-resolved broker-owned paths from the daemon and
+ *  translates them into one of a small number of fixed dump/restore commands.
  */
 
 #include "src/csrc/worker.h"

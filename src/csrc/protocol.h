@@ -16,6 +16,18 @@
 namespace snapshotd {
 
 /**
+ * @defgroup protocol_api Control Protocol
+ * @brief Length-prefixed request/response protocol used on the daemon socket.
+ *
+ * These types and helpers define the only wire format accepted by the
+ * privileged broker. The protocol is intentionally small and field-allowlisted
+ * so the root daemon never exposes a raw CRIU command tunnel.
+ *
+ * @see @ref safe_root_criu_broker_design
+ * @{
+ */
+
+/**
  * @brief Upper bound for one control-message payload.
  *
  * The daemon is root and accepts messages from any member of the socket group,
@@ -31,7 +43,13 @@ struct PeerCred {
   gid_t gid = 0;
 };
 
-/** @brief Simple key/value control message exchanged over the daemon socket. */
+/**
+ * @brief Simple key/value control message exchanged over the daemon socket.
+ *
+ * The protocol intentionally uses repeated string fields instead of a
+ * general-purpose object format. That keeps the root daemon's parsing surface
+ * small, deterministic, and easy to audit in code review.
+ */
 struct Message {
   /** @brief Command verb such as `run`, `checkpoint`, or `error`. */
   std::string command;
@@ -56,6 +74,8 @@ Message ReceiveMessage(int fd);
 void ValidateAllowedFields(
     const Message& message,
     const std::unordered_set<std::string>& allowed_fields);
+
+/** @} */
 
 }  // namespace snapshotd
 
