@@ -10,7 +10,7 @@ PACKAGE_LOCAL := $(CURDIR)/$(PACKAGE_NAME)
 DOCS_SCRIPT ?= docs/generate_docs.sh
 DOCS_TOOL ?= auto
 DOCS_OUTPUT_ROOT ?= build/docs
-DOCS_HTML_INDEX ?= $(DOCS_OUTPUT_ROOT)/site/index.html
+DOCS_HTML_INDEX = $(DOCS_OUTPUT_ROOT)/site/index.html
 
 .DEFAULT_GOAL := help
 
