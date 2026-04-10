@@ -1,5 +1,16 @@
 # Safe Root CRIU Broker Design
 
+This repository also ships generated API docs via Doxygen. The most relevant
+generated entry pages are the documentation home page, the `IT Review Guide`,
+and the Doxygen `Safe Root CRIU Broker Design` page.
+
+The implementation surfaces that enforce the design below are the daemon entry
+point `snapshotd::HandleRequest`, the persistent metadata boundary
+`snapshotd::Store`, the fixed CRIU builders `snapshotd::BuildDumpCommand` and
+`snapshotd::BuildRestoreCommand`, the process validation helper
+`snapshotd::ProcessMatchesPeerSecurity`, and the retention engine
+`snapshotd::PruneCheckpoints`.
+
 ## Goal
 
 This design lets higher-level tools use CRIU with root privileges without
@@ -38,6 +49,9 @@ management layer is allowed to invoke CRIU.
   - rejects unknown request fields
   - stores root-owned job and checkpoint metadata under `/var/lib/snapshotd`
   - maps each caller to managed jobs owned by that caller's kernel UID
+
+That boundary is implemented primarily in `snapshotd::HandleRequest`,
+`snapshotd::ValidateAllowedFields`, and `snapshotd::Store`.
 
 The packaged service still keeps socket activation in systemd. The daemon
 config file is for broker-owned runtime settings such as state paths, CRIU
@@ -94,6 +108,10 @@ Instead:
    privilege on exec.
 7. Later checkpoint/restore operations refer to `job_id`, not an arbitrary PID.
 
+The PID-stability and privilege checks for these steps live in
+`snapshotd::ReadProcessIdentity`, `snapshotd::ProcessIdentityMatches`,
+`snapshotd::ProcessMatchesPeerSecurity`, and `snapshotd::ValidateManagedExecutable`.
+
 This removes the biggest abuse case: using a privileged CRIU wrapper to inspect,
 freeze, or restore another user's host process tree.
 
@@ -126,6 +144,9 @@ IT:
 checkpointing another user's processes or converting the CRIU path into general
 root command execution.
 
+The code path is `CreatePidOwnedJob`, which still persists a managed job
+through `snapshotd::Store` before any privileged worker invocation occurs.
+
 ## Export Compatibility
 
 Some downstream clients want user-visible troubleshooting files in their own
@@ -150,6 +171,10 @@ The important boundary is:
 
 - restore uses the broker-owned checkpoint, not the exported compatibility copy
 - the exported copy exists only for diagnostics and compatibility
+
+That separation is represented concretely by `snapshotd::Store::CheckpointsDir`,
+`snapshotd::Store::ExportCheckpointDir`, and the export helper
+`ExportCheckpointArtifacts`.
 
 ## Retention, Cleanup, And Eviction
 
@@ -247,6 +272,10 @@ This gives the operator all three desired controls:
 Cleanup currently runs opportunistically after successful checkpoint and
 restore operations. That keeps the root-owned state bounded without exposing
 retention control to unprivileged callers.
+
+The implemented retention path is `snapshotd::PruneCheckpoints`, using
+checkpoint metadata refreshed through `RefreshCheckpointSize` and
+`TouchCheckpointRestoreUsage`.
 
 All cleanup decisions operate only on broker-owned metadata and broker-owned
 paths. User workspaces and exported compatibility mirrors are not the source of
@@ -376,6 +405,11 @@ Docker also documents checkpoint/restore as a CRIU-backed feature:
 
 - Docker checkpoint docs: <https://docs.docker.com/reference/cli/docker/checkpoint/>
 
+Docker's security documentation also explicitly calls out the privileged daemon
+boundary and Unix-socket access control:
+
+- Docker security docs: <https://docs.docker.com/engine/security/>
+
 That means the caller does not get "run CRIU on any host PID"; the caller asks
 Docker to checkpoint a managed container object.
 
@@ -391,6 +425,11 @@ Podman also documents that it relies on an OCI runtime such as `runc` or
 `crun`, which is the layer that interfaces with the operating system:
 
 - Podman overview: <https://docs.podman.io/>
+
+Podman's current docs also emphasize the managed-runtime model and its
+daemonless command-line interface:
+
+- Podman overview (latest docs): <https://docs.podman.io/en/latest/>
 
 ### What Is The Same, And What Is Different?
 
@@ -410,6 +449,26 @@ So the precise answer for IT is:
 
 > We are using the same privilege-separation pattern as Docker and Podman, but
 > applied to managed checkpoint jobs instead of containers.
+
+### CUDA Checkpoint Context
+
+As of April 10, 2026, I did not find an official Docker or Podman design
+document specifically about CUDA checkpoint/root-permission usage.
+
+What does exist is enough to frame the comparison:
+
+- NVIDIA documents CUDA checkpoint/restore as a separate GPU-state layer that
+  complements CPU-side checkpointing:
+  - CUDA driver API checkpoint docs:
+    <https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__CHECKPOINT.html>
+- NVIDIA's `cuda-checkpoint` utility documentation describes a PID-oriented tool
+  that combines with CRIU for full application checkpoint/restore:
+  - `cuda-checkpoint` utility:
+    <https://github.com/NVIDIA/cuda-checkpoint>
+
+That reinforces the same policy choice `snapshotd` already makes: if GPU-aware
+checkpoint/restore is added, it still belongs behind the broker boundary rather
+than as a raw privileged PID or argv tunnel.
 
 ## Systemd Packaging
 

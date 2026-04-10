@@ -1,0 +1,23 @@
+/** @page safe_root_criu_broker_design Safe Root CRIU Broker Design
+ *
+ * @tableofcontents
+ *
+ * This page is the API-linked companion to the repository design narrative in
+ * [docs/safe-root-criu-broker-design.md](safe-root-criu-broker-design.md).
+ *
+ * @section design_reference_core Core Broker Invariants
+ *
+ * - snapshotd::HandleRequest is the single policy entry point for accepted commands
+ * - snapshotd::ValidateAllowedFields rejects request fields outside each command's allowlist
+ * - snapshotd::ProcessMatchesPeerSecurity prevents stale or elevated process identities from drifting onto privileged operations
+ * - snapshotd::Store confines authoritative images and metadata to broker-owned state beneath `state_dir`
+ * - snapshotd::BuildDumpCommand and snapshotd::BuildRestoreCommand construct fixed CRIU invocations rather than forwarding raw user argv
+ * - snapshotd::PruneCheckpoints applies retention only from daemon-owned metadata and budgets
+ *
+ * @section design_reference_navigation Recommended Reading Order
+ *
+ * 1. @ref it_review_guide for the operator/security framing
+ * 2. [docs/safe-root-criu-broker-design.md](safe-root-criu-broker-design.md) for the long-form design narrative
+ * 3. @ref daemon_api and @ref worker_api for the concrete implementation boundary
+ * 4. @ref store_api and @ref protocol_api for the persisted-state and wire-format details
+ */

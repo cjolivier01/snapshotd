@@ -1,0 +1,30 @@
+/** @mainpage snapshotd Documentation
+ *
+ * @section snapshotd_intro Overview
+ *
+ * `snapshotd` is a small privileged broker that exposes a narrow
+ * checkpoint/restore API instead of handing users direct `sudo criu` access.
+ * The generated docs are structured for two audiences:
+ *
+ * - security/IT reviewers who need the privilege boundary explained in plain language
+ * - maintainers who need the broker's concrete types, flows, and invariants tied back to code
+ *
+ * Start with @ref it_review_guide for the operator-facing story, then read
+ * @ref safe_root_criu_broker_design for the architecture narrative, and then
+ * drill into the API groups below.
+ *
+ * @section snapshotd_component_map Component Map
+ *
+ * - @ref daemon_api owns request validation, privilege separation, worker launch, and retention
+ * - @ref worker_api constructs the fixed CRIU invocations and pid-namespace restore flow
+ * - @ref protocol_api defines the socket protocol shared by the daemon and CLI
+ * - @ref store_api persists managed job and checkpoint metadata under broker-owned state
+ * - @ref client_api provides the unprivileged synchronous Unix-socket client
+ * - @ref util_api holds process, filesystem, and validation helpers that enforce broker invariants
+ *
+ * @section snapshotd_related_docs Related Documents
+ *
+ * - @ref it_review_guide
+ * - @ref safe_root_criu_broker_design
+ * - [Repository README](../README.md)
+ */
