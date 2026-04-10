@@ -1,6 +1,7 @@
 filegroup(
     name = "docs_inputs",
     srcs = [
+        ".gitignore",
         "Makefile",
         "README.md",
         "docs/Doxyfile",
