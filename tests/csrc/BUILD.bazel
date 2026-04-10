@@ -6,6 +6,11 @@ COMMON_COPTS = [
     "-Wextra",
 ]
 
+filegroup(
+    name = "docs_tooling_fake_tools",
+    srcs = glob(["fake_docs_tools/*"]),
+)
+
 cc_test(
     name = "protocol_store_test",
     srcs = ["protocol_store_test.cc"],
@@ -36,5 +41,6 @@ sh_test(
     data = [
         "//:docs_inputs",
         "//src/csrc:docs_sources",
+        ":docs_tooling_fake_tools",
     ],
 )

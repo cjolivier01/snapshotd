@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_dir=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output=*)
+      output_dir="${1#--output=}"
+      shift
+      ;;
+    --output)
+      output_dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$output_dir" ]]; then
+  echo "expected --output for fake clang-doc" >&2
+  exit 1
+fi
+
+mkdir -p "$output_dir"
+cat >"$output_dir/index.md" <<'EOF'
+# API Reference
+
+snapshotd fake clang-doc output
+EOF

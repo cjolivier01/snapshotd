@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+strip_quotes() {
+  local value="$1"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf '%s' "$value"
+}
+
+config_file=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -f)
+      config_file="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$config_file" ]]; then
+  echo "expected -f <config> for fake mkdocs" >&2
+  exit 1
+fi
+
+docs_dir="$(awk -F: '/^docs_dir:/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "$config_file")"
+site_dir="$(awk -F: '/^site_dir:/{sub(/^[[:space:]]+/, "", $2); print $2; exit}' "$config_file")"
+docs_dir="$(strip_quotes "$docs_dir")"
+site_dir="$(strip_quotes "$site_dir")"
+
+mkdir -p "$site_dir"
+while IFS= read -r source_file; do
+  rel_path="${source_file#"$docs_dir"/}"
+  out_file="$site_dir/${rel_path%.md}.html"
+  mkdir -p "$(dirname "$out_file")"
+  {
+    printf '<html><body>snapshotd fake mkdocs %s\n' "$rel_path"
+    cat "$source_file"
+    printf '\n</body></html>\n'
+  } >"$out_file"
+done < <(find -L "$docs_dir" -type f -name '*.md' | sort)

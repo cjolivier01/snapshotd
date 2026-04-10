@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+strip_quotes() {
+  local value="$1"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf '%s' "$value"
+}
+
+config_file="${1:-}"
+if [[ -z "$config_file" ]]; then
+  echo "expected doxygen config path" >&2
+  exit 1
+fi
+
+output_dir="$(awk -F= '/^OUTPUT_DIRECTORY[[:space:]]*=/{sub(/^[[:space:]]+/, "", $2); value=$2} END{print value}' "$config_file")"
+html_output="$(awk -F= '/^HTML_OUTPUT[[:space:]]*=/{sub(/^[[:space:]]+/, "", $2); value=$2} END{print value}' "$config_file")"
+
+output_dir="$(strip_quotes "$output_dir")"
+html_output="$(strip_quotes "$html_output")"
+site_dir="${output_dir}/${html_output:-html}"
+
+mkdir -p "$site_dir"
+cat >"$site_dir/index.html" <<'EOF'
+<html><body>snapshotd fake doxygen index</body></html>
+EOF
+cat >"$site_dir/it-review-guide.html" <<'EOF'
+<html><body>snapshotd fake doxygen it review guide</body></html>
+EOF
+cat >"$site_dir/design-reference.html" <<'EOF'
+<html><body>snapshotd fake doxygen design reference</body></html>
+EOF
