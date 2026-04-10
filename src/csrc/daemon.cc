@@ -1,5 +1,11 @@
 /** @file
  *  @brief Policy-enforcing privileged broker for managed checkpoint jobs.
+ *
+ *  @details
+ *  This file contains the project's primary trust boundary: peer
+ *  authentication, request validation, managed-job launch, privileged worker
+ *  invocation, and checkpoint retention. When IT or security reviewers ask
+ *  where the root policy is enforced, this is the first file to inspect.
  */
 
 #include "src/csrc/daemon.h"
@@ -562,7 +568,8 @@ std::vector<std::string> BuildWorkerCommand(
     const CheckpointRecord& checkpoint,
     const std::string& operation,
     const std::vector<std::string>& extra_args,
-    bool namespace_mode) {
+    bool namespace_mode,
+    int tty_fd = -1) {
   const fs::path job_dir = store.JobDir(job.owner_uid, job.job_id);
   const fs::path checkpoint_dir =
       store.CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id);
@@ -589,6 +596,10 @@ std::vector<std::string> BuildWorkerCommand(
     }
   } else if (namespace_mode) {
     command.push_back("--namespace-restore");
+  }
+  if (tty_fd >= 0) {
+    command.push_back("--tty-fd");
+    command.push_back(std::to_string(tty_fd));
   }
   for (const std::string& extra_arg : extra_args) {
     command.push_back("--extra-arg");
@@ -900,7 +911,8 @@ Message HandleRequest(
     const Message& request,
     const PeerCred& peer,
     const DaemonConfig& config,
-    Store* store) {
+    Store* store,
+    int client_tty_fd) {
   if (request.command == "run") {
     ValidateAllowedFields(request, {"arg", "cwd"});
     const std::vector<std::string> args = request.GetAll("arg");
@@ -1053,7 +1065,8 @@ Message HandleRequest(
               checkpoint,
               "restore",
               extra_args,
-              namespace_restore),
+              namespace_restore,
+              client_tty_fd),
           std::chrono::seconds(config.worker_timeout_seconds));
     } catch (const std::exception& error) {
       checkpoint.state = "restore-failed";
@@ -1323,19 +1336,25 @@ int RunDaemon(const DaemonConfig& config) {
       }
       ThrowErrno("accept");
     }
-    try {
-      // Authorization is per-connection, derived from the kernel rather than
-      // any client-supplied uid/pid fields.
-      const PeerCred peer = GetPeerCred(client_fd);
-      const Message request = ReceiveMessage(client_fd);
-      const Message response = HandleRequest(request, peer, config, &store);
-      TrySendResponse(client_fd, response);
-    } catch (const RequestError& error) {
-      TrySendResponse(client_fd, ErrorResponse(error));
-    } catch (const std::exception& error) {
-      TrySendResponse(client_fd, ErrorResponse("request_failed", error.what()));
+    {
+      int ancillary_fd = -1;
+      try {
+        // Authorization is per-connection, derived from the kernel rather than
+        // any client-supplied uid/pid fields.
+        const PeerCred peer = GetPeerCred(client_fd);
+        const Message request = ReceiveMessageWithFd(client_fd, &ancillary_fd);
+        const Message response = HandleRequest(request, peer, config, &store, ancillary_fd);
+        TrySendResponse(client_fd, response);
+      } catch (const RequestError& error) {
+        TrySendResponse(client_fd, ErrorResponse(error));
+      } catch (const std::exception& error) {
+        TrySendResponse(client_fd, ErrorResponse("request_failed", error.what()));
+      }
+      if (ancillary_fd >= 0) {
+        close(ancillary_fd);
+      }
+      close(client_fd);
     }
-    close(client_fd);
   }
 
   if (!inherited_socket) {

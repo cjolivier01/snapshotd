@@ -1,5 +1,10 @@
 /** @file
  *  @brief Short-lived privileged worker that executes fixed CRIU commands.
+ *
+ *  @details
+ *  The worker never accepts raw user-supplied image paths or free-form CRIU
+ *  argv. It receives fully-resolved broker-owned paths from the daemon and
+ *  translates them into one of a small number of fixed dump/restore commands.
  */
 
 #include "src/csrc/worker.h"
@@ -241,7 +246,26 @@ void MountNewProc() {
   }
 }
 
-void PrepareControllingTty() {
+void PrepareControllingTty(int client_tty_fd) {
+  // If the client passed a TTY fd, dup2 it onto stdin/stdout/stderr so the
+  // restored process inherits the caller's actual terminal.
+  if (client_tty_fd >= 0 && isatty(client_tty_fd)) {
+    for (int fd_num = STDIN_FILENO; fd_num <= STDERR_FILENO; ++fd_num) {
+      if (dup2(client_tty_fd, fd_num) < 0) {
+        ThrowErrno("dup2(client tty)");
+      }
+    }
+    if (client_tty_fd > STDERR_FILENO) {
+      close(client_tty_fd);
+    }
+    if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) != 0) {
+      // Non-fatal: the controlling TTY claim may fail if the TTY already has
+      // an owner, but the dup2'd fds will still work for I/O.
+      (void)0;
+    }
+    return;
+  }
+
   if (isatty(STDIN_FILENO)) {
     if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) != 0) {
       ThrowErrno("ioctl(TIOCSCTTY)");
@@ -292,7 +316,7 @@ int RunNamespaceRestoreInit(const WorkerConfig& config, int status_fd, const fs:
     if (setsid() < 0) {
       ThrowErrno("setsid");
     }
-    PrepareControllingTty();
+    PrepareControllingTty(config.tty_fd);
     MountNewProc();
 
     const fs::path images_dir = config.checkpoint_dir / "images";
@@ -476,6 +500,8 @@ WorkerConfig ParseArgs(int argc, char** argv) {
       config.namespace_dump = true;
     } else if (arg == "--namespace-restore") {
       config.namespace_restore = true;
+    } else if (arg == "--tty-fd") {
+      config.tty_fd = static_cast<int>(std::stol(require_value(arg)));
     } else if (arg == "--extra-arg") {
       config.extra_args.push_back(require_value(arg));
     } else {
@@ -578,6 +604,18 @@ std::vector<std::string> BuildRestoreCommand(const WorkerConfig& config) {
 int RunWorker(const WorkerConfig& config) {
   if (config.operation == "restore" && config.namespace_restore) {
     return RunNamespaceRestore(config);
+  }
+  if (config.operation == "restore" && config.tty_fd >= 0 && isatty(config.tty_fd)) {
+    // Dup the client's TTY onto the worker's stdin/stdout/stderr so CRIU's
+    // --shell-job restore inherits the caller's actual terminal.
+    for (int fd_num = STDIN_FILENO; fd_num <= STDERR_FILENO; ++fd_num) {
+      if (dup2(config.tty_fd, fd_num) < 0) {
+        ThrowErrno("dup2(client tty for host restore)");
+      }
+    }
+    if (config.tty_fd > STDERR_FILENO) {
+      close(config.tty_fd);
+    }
   }
   const std::vector<std::string> command =
       config.operation == "dump" ? BuildDumpCommand(config) : BuildRestoreCommand(config);

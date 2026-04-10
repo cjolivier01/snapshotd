@@ -49,4 +49,35 @@ Message Client::Request(const Message& request) const {
   }
 }
 
+Message Client::RequestWithFd(const Message& request, int ancillary_fd) const {
+  const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    ThrowErrno("socket(AF_UNIX)");
+  }
+
+  sockaddr_un address {};
+  address.sun_family = AF_UNIX;
+  if (socket_path_.size() >= sizeof(address.sun_path)) {
+    close(fd);
+    throw std::runtime_error("socket path too long");
+  }
+  std::snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path_.c_str());
+
+  if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    const std::string error = ErrnoMessage("connect(" + socket_path_ + ")");
+    close(fd);
+    throw std::runtime_error(error);
+  }
+
+  try {
+    SendMessageWithFd(fd, request, ancillary_fd);
+    Message response = ReceiveMessage(fd);
+    close(fd);
+    return response;
+  } catch (...) {
+    close(fd);
+    throw;
+  }
+}
+
 }  // namespace snapshotd

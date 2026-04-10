@@ -14,6 +14,19 @@
 
 namespace snapshotd {
 
+/**
+ * @defgroup daemon_api Privileged Broker
+ * @brief Policy-enforcing daemon entry points and retention controls.
+ *
+ * This group is the core of the trust boundary. It authenticates peers,
+ * validates request fields, launches managed jobs as the caller, invokes the
+ * short-lived worker for CRIU operations, and applies daemon-owned retention.
+ *
+ * @see @ref it_review_guide
+ * @see @ref safe_root_criu_broker_design
+ * @{
+ */
+
 /** @brief Runtime configuration for the long-lived broker process. */
 struct DaemonConfig {
   /** @brief Unix-domain control socket path, or the systemd-activated socket. */
@@ -49,13 +62,19 @@ struct DaemonConfig {
  * @param peer Caller identity obtained from SO_PEERCRED.
  * @param config Daemon configuration.
  * @param store Persistent metadata store.
+ * @param client_tty_fd Optional TTY fd received via SCM_RIGHTS (-1 if none).
+ *        Ownership is NOT transferred; the caller must close it.
  * @return Reply message to send back on the same socket.
+ *
+ * This is the main policy gate for the broker. Every accepted operation must
+ * stay within the narrow API described in the design documents.
  */
 Message HandleRequest(
     const Message& request,
     const PeerCred& peer,
     const DaemonConfig& config,
-    Store* store);
+    Store* store,
+    int client_tty_fd = -1);
 /** @brief Apply retention and space-budget pruning to persisted checkpoints. */
 int PruneCheckpoints(
     const DaemonConfig& config,
@@ -67,6 +86,8 @@ int PruneCheckpoints(
 int RunDaemon(const DaemonConfig& config);
 /** @brief Parse CLI flags and invoke @ref RunDaemon. */
 int RunDaemonMain(int argc, char** argv);
+
+/** @} */
 
 }  // namespace snapshotd
 
