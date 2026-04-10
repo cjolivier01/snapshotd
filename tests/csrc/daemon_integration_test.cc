@@ -1,11 +1,16 @@
+#include <pty.h>
+#include <poll.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
+#include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -31,6 +36,22 @@ struct CommandResult {
   std::string stdout_text;
   std::string stderr_text;
 };
+
+struct TtyCommandResult {
+  int exit_code = 0;
+  std::string output_text;
+  std::string caller_tty_nr;
+  std::string tty_path;
+};
+
+struct ProcStatFields {
+  std::string pgrp;
+  std::string sid;
+  std::string tty_nr;
+  std::string tpgid;
+};
+
+ProcStatFields ReadProcStatFields(pid_t pid);
 
 void Expect(bool condition, const std::string& message) {
   if (!condition) {
@@ -64,6 +85,9 @@ std::map<std::string, std::string> ParseOutputMap(const std::string& text) {
   std::istringstream lines(text);
   std::string line;
   while (std::getline(lines, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
     if (line.empty()) {
       continue;
     }
@@ -134,6 +158,127 @@ CommandResult RunCommand(
   result.stderr_text = read_all(stderr_pipe[0]);
   int status = 0;
   if (waitpid(child, &status, 0) < 0) {
+    throw std::runtime_error("waitpid failed");
+  }
+  result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+  return result;
+}
+
+TtyCommandResult RunCommandWithControllingTty(
+    const std::vector<std::string>& argv,
+    const std::map<std::string, std::string>& extra_env = {}) {
+  int master_fd = -1;
+  const pid_t child = forkpty(&master_fd, nullptr, nullptr, nullptr);
+  if (child < 0) {
+    throw std::runtime_error("forkpty failed");
+  }
+  if (child == 0) {
+    for (const auto& [key, value] : extra_env) {
+      setenv(key.c_str(), value.c_str(), 1);
+    }
+    std::vector<char*> exec_argv;
+    exec_argv.reserve(argv.size() + 1);
+    for (const std::string& token : argv) {
+      exec_argv.push_back(const_cast<char*>(token.c_str()));
+    }
+    exec_argv.push_back(nullptr);
+    execv(argv.front().c_str(), exec_argv.data());
+    _exit(127);
+  }
+
+  const char* tty_name = ptsname(master_fd);
+  if (tty_name == nullptr) {
+    close(master_fd);
+    throw std::runtime_error("ptsname failed");
+  }
+
+  TtyCommandResult result;
+  result.caller_tty_nr = ReadProcStatFields(child).tty_nr;
+  result.tty_path = tty_name;
+  int status = 0;
+  const int current_flags = fcntl(master_fd, F_GETFL);
+  if (current_flags < 0 || fcntl(master_fd, F_SETFL, current_flags | O_NONBLOCK) != 0) {
+    close(master_fd);
+    throw std::runtime_error("failed to enable nonblocking pty reads");
+  }
+  bool child_exited = false;
+  auto drain_available_output = [&](bool* saw_hangup) {
+    char buffer[4096];
+    while (true) {
+      const ssize_t count = read(master_fd, buffer, sizeof(buffer));
+      if (count > 0) {
+        result.output_text.append(buffer, static_cast<std::size_t>(count));
+        continue;
+      }
+      if (count == 0) {
+        *saw_hangup = true;
+        return;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return;
+      }
+      if (errno == EIO) {
+        *saw_hangup = true;
+        return;
+      }
+      close(master_fd);
+      throw std::runtime_error("read from pty failed");
+    }
+  };
+  const auto post_exit_idle_timeout = std::chrono::milliseconds(200);
+  auto post_exit_deadline = std::chrono::steady_clock::time_point::max();
+  while (true) {
+    if (!child_exited) {
+      const pid_t waited = waitpid(child, &status, WNOHANG);
+      if (waited < 0) {
+        close(master_fd);
+        throw std::runtime_error("waitpid failed");
+      }
+      if (waited == child) {
+        child_exited = true;
+        post_exit_deadline = std::chrono::steady_clock::now() + post_exit_idle_timeout;
+      }
+    }
+
+    pollfd poll_fd {};
+    poll_fd.fd = master_fd;
+    poll_fd.events = POLLIN | POLLHUP;
+    int poll_timeout_ms = 50;
+    if (child_exited) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= post_exit_deadline) {
+        break;
+      }
+      poll_timeout_ms = static_cast<int>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(post_exit_deadline - now).count());
+    }
+    const int poll_result = poll(&poll_fd, 1, poll_timeout_ms);
+    if (poll_result < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      close(master_fd);
+      throw std::runtime_error("poll on pty failed");
+    }
+    if (poll_result == 0) {
+      if (child_exited) {
+        break;
+      }
+      continue;
+    }
+    bool saw_hangup = false;
+    if ((poll_fd.revents & (POLLIN | POLLHUP)) != 0) {
+      drain_available_output(&saw_hangup);
+    }
+    if (saw_hangup && child_exited) {
+      break;
+    }
+  }
+  close(master_fd);
+  if (!child_exited && waitpid(child, &status, 0) < 0) {
     throw std::runtime_error("waitpid failed");
   }
   result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
@@ -267,6 +412,30 @@ std::string DescriptorTarget(pid_t pid, int fd) {
       .string();
 }
 
+ProcStatFields ReadProcStatFields(pid_t pid) {
+  std::istringstream input(snapshotd::ReadTextFile(fs::path("/proc") / std::to_string(pid) / "stat"));
+  std::string pid_field;
+  std::string comm_field;
+  ProcStatFields fields;
+  std::string state_field;
+  std::string ppid_field;
+  if (!(input >> pid_field >> comm_field >> state_field >> ppid_field >> fields.pgrp >> fields.sid >>
+        fields.tty_nr >> fields.tpgid)) {
+    throw std::runtime_error("failed to parse /proc stat for pid " + std::to_string(pid));
+  }
+  return fields;
+}
+
+bool LoggedTtyTargetMatches(const std::map<std::string, std::string>& values,
+                            const std::string& key,
+                            const std::string& tty_path) {
+  const auto found = values.find(key);
+  if (found == values.end()) {
+    return false;
+  }
+  return found->second == tty_path || found->second == "/dev/tty";
+}
+
 void TestDaemonFlowAndMaliciousInputs() {
   const fs::path temp_dir = MakeTempDir("daemonit");
   const fs::path socket_path = temp_dir / "snapshotd.sock";
@@ -274,9 +443,11 @@ void TestDaemonFlowAndMaliciousInputs() {
   const fs::path ready_file = temp_dir / "ready";
   const fs::path call_log = temp_dir / "fake-criu.calls.log";
   const fs::path env_log = temp_dir / "fake-criu.env.log";
+  const fs::path restore_tty_log = temp_dir / "fake-criu.restore-tty.log";
   const fs::path fake_criu = temp_dir / "fake-criu.sh";
   const fs::path fake_criu_ns = temp_dir / "criu-ns";
   const fs::path daemon_bin = Runfile("src/csrc/snapshotd");
+  const fs::path restore_stub_bin = Runfile("tests/csrc/restore_stub");
   const fs::path worker_bin = Runfile("src/csrc/snapshot-worker");
   const fs::path ctl_bin = Runfile("src/csrc/snapshotctl");
 
@@ -286,6 +457,7 @@ void TestDaemonFlowAndMaliciousInputs() {
       "set -eu\n"
       "call_log='" + call_log.string() + "'\n"
       "env_log='" + env_log.string() + "'\n"
+      "restore_tty_log='" + restore_tty_log.string() + "'\n"
       "{\n"
       "  printf 'argv0=%s\\n' \"$0\"\n"
       "  for arg in \"$@\"; do printf 'arg=%s\\n' \"$arg\"; done\n"
@@ -314,12 +486,26 @@ void TestDaemonFlowAndMaliciousInputs() {
       "  printf '%s\\n' 'fake-criu log' > \"$logfile\"\n"
       "fi\n"
       "if [ \"$mode\" = 'restore' ]; then\n"
-      "  sleep 60 &\n"
+      "  read -r self_pid _ self_state self_ppid self_pgrp self_sid self_tty_nr self_tpgid _ < /proc/self/stat\n"
+      "  exec 9> \"$restore_tty_log\"\n"
+      "  printf 'pid=%s\\n' \"$self_pid\" >&9\n"
+      "  printf 'pgrp=%s\\n' \"$self_pgrp\" >&9\n"
+      "  printf 'sid=%s\\n' \"$self_sid\" >&9\n"
+      "  printf 'tty_nr=%s\\n' \"$self_tty_nr\" >&9\n"
+      "  printf 'tpgid=%s\\n' \"$self_tpgid\" >&9\n"
+      "  printf 'tty_path=' >&9\n"
+      "  tty >&9\n"
+      "  printf 'stdin=' >&9\n"
+      "  readlink /proc/$$/fd/0 >&9\n"
+      "  printf 'stdout=' >&9\n"
+      "  readlink /proc/$$/fd/1 >&9\n"
+      "  printf 'stderr=' >&9\n"
+      "  readlink /proc/$$/fd/2 >&9\n"
+      "  if [ -n \"$pidfile\" ]; then\n"
+      "    '" + restore_stub_bin.string() + "' --pidfile \"$pidfile\"\n"
+      "  fi\n"
       "fi\n"
-      "if [ -n \"$pidfile\" ]; then\n"
-      "  mkdir -p \"$(dirname \"$pidfile\")\"\n"
-      "  printf '%s\\n' \"$!\" > \"$pidfile\"\n"
-      "fi\n");
+      );
   WriteExecutable(fake_criu_ns, snapshotd::ReadTextFile(fake_criu));
 
   const pid_t daemon_pid = SpawnDaemon(
@@ -469,12 +655,31 @@ void TestDaemonFlowAndMaliciousInputs() {
     Expect(status_after_disconnect.exit_code == 0,
            "daemon should survive a client disconnect during response write");
 
-    CommandResult restore_result =
-        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "restore", job_id});
-    Expect(restore_result.exit_code == 0, "restore command failed: " + restore_result.stderr_text);
-    const auto restore_map = ParseOutputMap(restore_result.stdout_text);
+    TtyCommandResult restore_result = RunCommandWithControllingTty(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "restore", job_id});
+    Expect(restore_result.exit_code == 0, "restore command failed: " + restore_result.output_text);
+    const auto restore_map = ParseOutputMap(restore_result.output_text);
     restored_pid = static_cast<pid_t>(std::stol(restore_map.at("restored_pid")));
     Expect(restored_pid > 1, "restore pidfile was not propagated");
+    WaitForPath(restore_tty_log, std::chrono::milliseconds(5000));
+    const auto restore_tty_map = ParseOutputMap(snapshotd::ReadTextFile(restore_tty_log));
+    const std::string& caller_tty_nr = restore_result.caller_tty_nr;
+    Expect(LoggedTtyTargetMatches(restore_tty_map, "stdin", restore_result.tty_path),
+           "restore should bind stdin to the controlling tty device");
+    Expect(LoggedTtyTargetMatches(restore_tty_map, "stdout", restore_result.tty_path),
+           "restore should bind stdout to the controlling tty device");
+    Expect(LoggedTtyTargetMatches(restore_tty_map, "stderr", restore_result.tty_path),
+           "restore should bind stderr to the controlling tty device");
+    Expect(restore_tty_map.at("pid") == restore_tty_map.at("sid"),
+           "host restore should run as a session leader for job control");
+    Expect(restore_tty_map.at("pid") == restore_tty_map.at("pgrp"),
+           "host restore should own its process group");
+    if (restore_tty_map.at("tty_nr") != "0") {
+      Expect(restore_tty_map.at("tty_nr") == caller_tty_nr,
+             "restore should claim the caller's controlling terminal");
+      Expect(restore_tty_map.at("tpgid") == restore_tty_map.at("pgrp"),
+             "host restore should control the tty foreground process group");
+    }
 
     CommandResult status_after_restore =
         RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "status", job_id});

@@ -9,6 +9,9 @@
 
 #include "src/csrc/client.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -42,6 +45,27 @@ Message CheckedRequest(const Client& client, const Message& request) {
     throw std::runtime_error(response.Get("message", "unknown control error"));
   }
   return response;
+}
+
+Message CheckedRequest(const Client& client, const Message& request, int ancillary_fd) {
+  Message response =
+      ancillary_fd >= 0 ? client.RequestWithFd(request, ancillary_fd) : client.Request(request);
+  if (response.command == "error") {
+    throw std::runtime_error(response.Get("message", "unknown control error"));
+  }
+  return response;
+}
+
+int OpenControllingTtyForRestore() {
+  // Use /dev/tty rather than stdio so restore can still recover the caller's
+  // interactive terminal even when stdin/stdout are redirected by a script.
+  const int fd = open("/dev/tty", O_RDWR | O_CLOEXEC);
+  if (fd >= 0) {
+    return fd;
+  }
+  // Restore must remain usable for non-interactive callers that simply do not
+  // have a controlling terminal to pass.
+  return -1;
 }
 
 }  // namespace
@@ -122,7 +146,18 @@ int main(int argc, char** argv) {
       if (index != argc) {
         throw std::runtime_error("restore accepts at most one optional checkpoint id");
       }
-      PrintResponse(CheckedRequest(client, request));
+      const int tty_fd = OpenControllingTtyForRestore();
+      try {
+        PrintResponse(CheckedRequest(client, request, tty_fd));
+      } catch (...) {
+        if (tty_fd >= 0) {
+          close(tty_fd);
+        }
+        throw;
+      }
+      if (tty_fd >= 0) {
+        close(tty_fd);
+      }
       return 0;
     }
 
