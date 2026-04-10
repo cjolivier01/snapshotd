@@ -48,6 +48,8 @@ struct WorkerConfig {
   bool namespace_restore = false;
   /** @brief Small allowlisted set of extra CRIU flags forwarded by the daemon. */
   std::vector<std::string> extra_args;
+  /** @brief Client TTY fd to dup2 onto stdin/stdout/stderr before restore (-1 if none). */
+  int tty_fd = -1;
 };
 
 /** @brief Construct the exact CRIU command used for a dump operation. */

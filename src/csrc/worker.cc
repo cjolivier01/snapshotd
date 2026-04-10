@@ -13,6 +13,7 @@
 #include <poll.h>
 #include <pty.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
@@ -34,6 +35,11 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr auto kNamespaceRestoreTimeout = std::chrono::seconds(20);
+constexpr auto kHostRestoreTerminationGrace = std::chrono::milliseconds(500);
+volatile sig_atomic_t g_host_restore_child_pgid = -1;
+volatile sig_atomic_t g_host_restore_termination_signal = 0;
+
+void PrepareControllingTty(int client_tty_fd);
 
 bool ContainsArg(const std::vector<std::string>& args, const std::string& token) {
   for (const std::string& arg : args) {
@@ -124,6 +130,109 @@ int ForkExec(const std::vector<std::string>& command) {
   int status = 0;
   if (waitpid(child, &status, 0) < 0) {
     ThrowErrno("waitpid");
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    throw std::runtime_error("worker child command failed: " + JoinCommandLine(command));
+  }
+  return 0;
+}
+
+void RequestHostRestoreTermination(int signal_number) {
+  g_host_restore_termination_signal = signal_number;
+}
+
+int ForkExecRestoreWithControllingTty(
+    const std::vector<std::string>& command,
+    int client_tty_fd) {
+  const pid_t child = fork();
+  if (child < 0) {
+    ThrowErrno("fork");
+  }
+  if (child == 0) {
+    try {
+      if (setsid() < 0) {
+        ThrowErrno("setsid");
+      }
+      PrepareControllingTty(client_tty_fd);
+      ExecCommand(command);
+    } catch (...) {
+      _exit(127);
+    }
+  }
+
+  if (client_tty_fd > STDERR_FILENO) {
+    close(client_tty_fd);
+  }
+
+  struct sigaction forward_action {};
+  sigemptyset(&forward_action.sa_mask);
+  forward_action.sa_handler = RequestHostRestoreTermination;
+
+  struct sigaction old_term {};
+  struct sigaction old_int {};
+  struct sigaction old_hup {};
+  g_host_restore_child_pgid = child;
+  g_host_restore_termination_signal = 0;
+  if (sigaction(SIGTERM, &forward_action, &old_term) != 0 ||
+      sigaction(SIGINT, &forward_action, &old_int) != 0 ||
+      sigaction(SIGHUP, &forward_action, &old_hup) != 0) {
+    g_host_restore_child_pgid = -1;
+    ThrowErrno("sigaction");
+  }
+
+  int status = 0;
+  bool forwarded_termination = false;
+  auto termination_deadline = std::chrono::steady_clock::time_point::max();
+  while (true) {
+    const int wait_flags =
+        (g_host_restore_termination_signal != 0 || forwarded_termination) ? WNOHANG : 0;
+    const pid_t waited = waitpid(child, &status, wait_flags);
+    if (waited == child) {
+      break;
+    }
+    if (waited == 0) {
+      if (!forwarded_termination) {
+        const int signal_number =
+            g_host_restore_termination_signal != 0 ? g_host_restore_termination_signal : SIGTERM;
+        (void)!kill(-child, signal_number);
+        forwarded_termination = true;
+        termination_deadline = std::chrono::steady_clock::now() + kHostRestoreTerminationGrace;
+      } else if (std::chrono::steady_clock::now() >= termination_deadline) {
+        (void)!kill(-child, SIGKILL);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+    if (waited < 0 && errno == EINTR) {
+      if (g_host_restore_termination_signal != 0 && !forwarded_termination) {
+        (void)!kill(-child, g_host_restore_termination_signal);
+        forwarded_termination = true;
+        termination_deadline = std::chrono::steady_clock::now() + kHostRestoreTerminationGrace;
+      }
+      continue;
+    }
+    if (waited < 0) {
+      const int saved_errno = errno;
+      g_host_restore_child_pgid = -1;
+      g_host_restore_termination_signal = 0;
+      (void)!sigaction(SIGTERM, &old_term, nullptr);
+      (void)!sigaction(SIGINT, &old_int, nullptr);
+      (void)!sigaction(SIGHUP, &old_hup, nullptr);
+      errno = saved_errno;
+      ThrowErrno("waitpid");
+    }
+  }
+
+  g_host_restore_child_pgid = -1;
+  const int termination_signal = g_host_restore_termination_signal;
+  g_host_restore_termination_signal = 0;
+  (void)!sigaction(SIGTERM, &old_term, nullptr);
+  (void)!sigaction(SIGINT, &old_int, nullptr);
+  (void)!sigaction(SIGHUP, &old_hup, nullptr);
+
+  if (termination_signal != 0) {
+    throw std::runtime_error(
+        "worker child command interrupted by signal " + std::to_string(termination_signal));
   }
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
     throw std::runtime_error("worker child command failed: " + JoinCommandLine(command));
@@ -246,11 +355,36 @@ void MountNewProc() {
   }
 }
 
-void PrepareControllingTty() {
+void PrepareControllingTty(int client_tty_fd) {
+  auto set_foreground_process_group = [] {
+    if (tcsetpgrp(STDIN_FILENO, getpgrp()) != 0) {
+      ThrowErrno("tcsetpgrp");
+    }
+  };
+  // If the client passed a TTY fd, dup2 it onto stdin/stdout/stderr so the
+  // restored process inherits the caller's actual terminal.
+  if (client_tty_fd >= 0 && isatty(client_tty_fd)) {
+    for (int fd_num = STDIN_FILENO; fd_num <= STDERR_FILENO; ++fd_num) {
+      if (dup2(client_tty_fd, fd_num) < 0) {
+        ThrowErrno("dup2(client tty)");
+      }
+    }
+    if (client_tty_fd > STDERR_FILENO) {
+      close(client_tty_fd);
+    }
+    if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) == 0) {
+      set_foreground_process_group();
+    } else if (errno != EPERM) {
+      ThrowErrno("ioctl(TIOCSCTTY)");
+    }
+    return;
+  }
+
   if (isatty(STDIN_FILENO)) {
     if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) != 0) {
       ThrowErrno("ioctl(TIOCSCTTY)");
     }
+    set_foreground_process_group();
     return;
   }
   int master_fd = -1;
@@ -266,6 +400,7 @@ void PrepareControllingTty() {
   if (ioctl(STDIN_FILENO, TIOCSCTTY, 1) != 0) {
     ThrowErrno("ioctl(TIOCSCTTY)");
   }
+  set_foreground_process_group();
   if (slave_fd > STDERR_FILENO) {
     close(slave_fd);
   }
@@ -297,7 +432,7 @@ int RunNamespaceRestoreInit(const WorkerConfig& config, int status_fd, const fs:
     if (setsid() < 0) {
       ThrowErrno("setsid");
     }
-    PrepareControllingTty();
+    PrepareControllingTty(config.tty_fd);
     MountNewProc();
 
     const fs::path images_dir = config.checkpoint_dir / "images";
@@ -481,6 +616,8 @@ WorkerConfig ParseArgs(int argc, char** argv) {
       config.namespace_dump = true;
     } else if (arg == "--namespace-restore") {
       config.namespace_restore = true;
+    } else if (arg == "--tty-fd") {
+      config.tty_fd = static_cast<int>(std::stol(require_value(arg)));
     } else if (arg == "--extra-arg") {
       config.extra_args.push_back(require_value(arg));
     } else {
@@ -586,6 +723,11 @@ int RunWorker(const WorkerConfig& config) {
   }
   const std::vector<std::string> command =
       config.operation == "dump" ? BuildDumpCommand(config) : BuildRestoreCommand(config);
+  if (config.operation == "restore") {
+    // Host restore needs a real session leader and controlling TTY so shell-job
+    // restores inherit the caller's terminal with working job control.
+    return ForkExecRestoreWithControllingTty(command, config.tty_fd);
+  }
   return ForkExec(command);
 }
 

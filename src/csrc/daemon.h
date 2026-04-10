@@ -62,16 +62,19 @@ struct DaemonConfig {
  * @param peer Caller identity obtained from SO_PEERCRED.
  * @param config Daemon configuration.
  * @param store Persistent metadata store.
+ * @param client_tty_fd Optional TTY fd received via SCM_RIGHTS (-1 if none).
+ *        Ownership is NOT transferred; the caller must close it.
+ * @return Reply message to send back on the same socket.
  *
  * This is the main policy gate for the broker. Every accepted operation must
  * stay within the narrow API described in the design documents.
- * @return Reply message to send back on the same socket.
  */
 Message HandleRequest(
     const Message& request,
     const PeerCred& peer,
     const DaemonConfig& config,
-    Store* store);
+    Store* store,
+    int client_tty_fd = -1);
 /** @brief Apply retention and space-budget pruning to persisted checkpoints. */
 int PruneCheckpoints(
     const DaemonConfig& config,

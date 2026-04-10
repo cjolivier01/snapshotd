@@ -70,6 +70,25 @@ PeerCred GetPeerCred(int fd);
 void SendMessage(int fd, const Message& message);
 /** @brief Receive and decode one framed control message. */
 Message ReceiveMessage(int fd);
+
+/**
+ * @brief Send a framed control message with an optional file descriptor.
+ *
+ * When @p ancillary_fd >= 0 the descriptor is transmitted to the peer via
+ * SCM_RIGHTS ancillary data on the first sendmsg(2) call.  The caller
+ * retains ownership of the descriptor (it is not closed).
+ */
+void SendMessageWithFd(int socket_fd, const Message& message, int ancillary_fd);
+
+/**
+ * @brief Receive a framed control message and an optional file descriptor.
+ *
+ * If the peer attached a descriptor via SCM_RIGHTS, @p *received_fd is set
+ * to the new local descriptor and the caller takes ownership (must close).
+ * Otherwise @p *received_fd is set to -1.
+ */
+Message ReceiveMessageWithFd(int socket_fd, int* received_fd);
+
 /** @brief Reject any request field that is not explicitly allowlisted. */
 void ValidateAllowedFields(
     const Message& message,

@@ -38,6 +38,18 @@ class Client {
    */
   Message Request(const Message& request) const;
 
+  /**
+   * @brief Send a request with an ancillary file descriptor.
+   *
+   * The descriptor is transmitted via SCM_RIGHTS so the daemon receives a
+   * kernel-duplicated copy.  The caller retains ownership of @p ancillary_fd.
+   *
+   * @param request Fully-populated control message.
+   * @param ancillary_fd File descriptor to pass (-1 to skip).
+   * @return The daemon response message.
+   */
+  Message RequestWithFd(const Message& request, int ancillary_fd) const;
+
  private:
   std::string socket_path_;
 };

@@ -1,9 +1,13 @@
+#include <fcntl.h>
+#include <pty.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <filesystem>
+#include <cstring>
 #include <functional>
 #include <ctime>
 #include <iostream>
@@ -338,6 +342,232 @@ void TestSafeIdValidation() {
       "unsafe id rejection");
 }
 
+// --- SCM_RIGHTS fd-passing tests ---
+
+void TestSendReceiveMessageWithFdRoundTrip() {
+  // Verify a message + ancillary fd survive a socketpair roundtrip.
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+
+  // Create a pipe so we have a recognizable fd to send.
+  int pipe_fds[2] = {-1, -1};
+  if (pipe(pipe_fds) != 0) {
+    throw std::runtime_error("pipe failed");
+  }
+
+  snapshotd::Message outgoing;
+  outgoing.command = "restore";
+  outgoing.AddField("job_id", "job-fd-test");
+  snapshotd::SendMessageWithFd(fds[0], outgoing, pipe_fds[0]);
+
+  int received_fd = -1;
+  const snapshotd::Message incoming = snapshotd::ReceiveMessageWithFd(fds[1], &received_fd);
+  Expect(incoming.command == "restore", "fd roundtrip command mismatch");
+  Expect(incoming.Get("job_id") == "job-fd-test", "fd roundtrip field mismatch");
+  Expect(received_fd >= 0, "expected to receive a file descriptor");
+
+  // Verify the received fd is a valid dup of the pipe read end: write to the
+  // pipe write end and read from the received fd.
+  const char test_data[] = "hello";
+  Expect(write(pipe_fds[1], test_data, sizeof(test_data)) == static_cast<ssize_t>(sizeof(test_data)),
+         "pipe write failed");
+  char buf[sizeof(test_data)] = {};
+  Expect(read(received_fd, buf, sizeof(buf)) == static_cast<ssize_t>(sizeof(test_data)),
+         "pipe read from received fd failed");
+  Expect(std::string(buf, sizeof(test_data)) == std::string(test_data, sizeof(test_data)),
+         "data read from received fd does not match");
+
+  close(received_fd);
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
+  close(fds[0]);
+  close(fds[1]);
+}
+
+void TestSendReceiveMessageWithNoFd() {
+  // Sending with ancillary_fd = -1 should behave like a normal message.
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+
+  snapshotd::Message outgoing;
+  outgoing.command = "status";
+  outgoing.AddField("key", "value");
+  snapshotd::SendMessageWithFd(fds[0], outgoing, -1);
+
+  int received_fd = -1;
+  const snapshotd::Message incoming = snapshotd::ReceiveMessageWithFd(fds[1], &received_fd);
+  Expect(incoming.command == "status", "no-fd command mismatch");
+  Expect(incoming.Get("key") == "value", "no-fd field mismatch");
+  Expect(received_fd == -1, "should not receive an fd when none was sent");
+
+  close(fds[0]);
+  close(fds[1]);
+}
+
+void TestSendMessageWithFdToPty() {
+  // Verify that a PTY fd can be sent and the receiver sees it as a tty.
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+
+  int master_fd = -1;
+  int slave_fd = -1;
+  if (openpty(&master_fd, &slave_fd, nullptr, nullptr, nullptr) != 0) {
+    throw std::runtime_error("openpty failed");
+  }
+
+  snapshotd::Message outgoing;
+  outgoing.command = "restore";
+  snapshotd::SendMessageWithFd(fds[0], outgoing, slave_fd);
+
+  int received_fd = -1;
+  snapshotd::ReceiveMessageWithFd(fds[1], &received_fd);
+  Expect(received_fd >= 0, "expected to receive pty fd");
+  Expect(isatty(received_fd) == 1, "received fd should be a tty");
+
+  // Verify it's a distinct fd number from the original.
+  Expect(received_fd != slave_fd, "received fd should be a kernel-duplicated copy");
+
+  // Verify the sender still owns the original fd (not closed).
+  struct stat stat_buf {};
+  Expect(fstat(slave_fd, &stat_buf) == 0, "original slave_fd should still be valid after send");
+
+  close(received_fd);
+  close(slave_fd);
+  close(master_fd);
+  close(fds[0]);
+  close(fds[1]);
+}
+
+void TestReceiveMessageWithFdRejectsOversized() {
+  // Oversized messages with an attached fd should close the fd and throw.
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+
+  // Manually write an oversized header with an ancillary fd.
+  int pipe_fds[2] = {-1, -1};
+  if (pipe(pipe_fds) != 0) {
+    throw std::runtime_error("pipe failed");
+  }
+
+  const std::uint32_t bad_size =
+      static_cast<std::uint32_t>(snapshotd::kMaxControlMessageBytes + 1);
+
+  // Build the sendmsg with the oversized header and attached fd.
+  struct iovec iov {};
+  iov.iov_base = const_cast<std::uint32_t*>(&bad_size);
+  iov.iov_len = sizeof(bad_size);
+  union {
+    struct cmsghdr align;
+    char buf[CMSG_SPACE(sizeof(int))];
+  } cmsg_buf;
+  memset(&cmsg_buf, 0, sizeof(cmsg_buf));
+  struct msghdr msg {};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cmsg_buf.buf;
+  msg.msg_controllen = sizeof(cmsg_buf.buf);
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(cmsg), &pipe_fds[0], sizeof(int));
+  Expect(sendmsg(fds[0], &msg, MSG_NOSIGNAL) > 0, "sendmsg should succeed");
+
+  int received_fd = -1;
+  ExpectThrows(
+      [&]() {
+        (void)snapshotd::ReceiveMessageWithFd(fds[1], &received_fd);
+      },
+      "oversized message with fd");
+  // The received fd should be cleaned up (set to -1) by ReceiveMessageWithFd.
+  Expect(received_fd == -1, "fd should be closed on oversized reject");
+
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
+  close(fds[0]);
+  close(fds[1]);
+}
+
+void TestFdPassingWithLargeMessage() {
+  // Verify fd passing works with a message that requires multiple sendmsg/recvmsg calls.
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+
+  snapshotd::Message outgoing;
+  outgoing.command = "restore";
+  // Add many fields to make the message larger.
+  for (int index = 0; index < 500; ++index) {
+    outgoing.AddField("field_" + std::to_string(index), std::string(100, 'x'));
+  }
+
+  int pipe_fds[2] = {-1, -1};
+  if (pipe(pipe_fds) != 0) {
+    throw std::runtime_error("pipe failed");
+  }
+
+  snapshotd::SendMessageWithFd(fds[0], outgoing, pipe_fds[0]);
+
+  int received_fd = -1;
+  const snapshotd::Message incoming = snapshotd::ReceiveMessageWithFd(fds[1], &received_fd);
+  Expect(incoming.command == "restore", "large message command mismatch");
+  Expect(incoming.Get("field_0") == std::string(100, 'x'), "large message field mismatch");
+  Expect(incoming.Get("field_499") == std::string(100, 'x'), "large message last field mismatch");
+  Expect(received_fd >= 0, "expected fd with large message");
+
+  // Verify the fd is usable.
+  const char probe[] = "ok";
+  Expect(write(pipe_fds[1], probe, 2) == 2, "pipe write failed");
+  char result[2] = {};
+  Expect(read(received_fd, result, 2) == 2, "pipe read from received fd failed");
+  Expect(result[0] == 'o' && result[1] == 'k', "data mismatch on large message fd");
+
+  close(received_fd);
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
+  close(fds[0]);
+  close(fds[1]);
+}
+
+void TestSendWithFdReceiveWithPlainReceiveMessage() {
+  // Sending with an fd but receiving with the plain ReceiveMessage should
+  // still decode the message correctly (the fd is silently discarded by the
+  // kernel since recvmsg without an ancillary buffer drops them).
+  int fds[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+    throw std::runtime_error("socketpair failed");
+  }
+
+  int pipe_fds[2] = {-1, -1};
+  if (pipe(pipe_fds) != 0) {
+    throw std::runtime_error("pipe failed");
+  }
+
+  snapshotd::Message outgoing;
+  outgoing.command = "checkpoint";
+  outgoing.AddField("job_id", "compat-test");
+  snapshotd::SendMessageWithFd(fds[0], outgoing, pipe_fds[0]);
+
+  // Use plain ReceiveMessage (no fd support) — should still work.
+  const snapshotd::Message incoming = snapshotd::ReceiveMessage(fds[1]);
+  Expect(incoming.command == "checkpoint", "compat command mismatch");
+  Expect(incoming.Get("job_id") == "compat-test", "compat field mismatch");
+
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
+  close(fds[0]);
+  close(fds[1]);
+}
+
 }  // namespace
 
 int main() {
@@ -351,6 +581,12 @@ int main() {
     TestPruneCheckpointsPrefersColdEntriesUnderByteBudget();
     TestWriteTextFilePreservesPrivateParentPermissions();
     TestSafeIdValidation();
+    TestSendReceiveMessageWithFdRoundTrip();
+    TestSendReceiveMessageWithNoFd();
+    TestSendMessageWithFdToPty();
+    TestReceiveMessageWithFdRejectsOversized();
+    TestFdPassingWithLargeMessage();
+    TestSendWithFdReceiveWithPlainReceiveMessage();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << "\n";
