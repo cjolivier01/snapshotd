@@ -372,6 +372,17 @@ void WaitForPath(const fs::path& path, std::chrono::milliseconds timeout) {
   throw std::runtime_error("timed out waiting for " + path.string());
 }
 
+void WaitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!snapshotd::IsProcessAlive(pid)) {
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  throw std::runtime_error("timed out waiting for pid " + std::to_string(pid) + " to exit");
+}
+
 void KillAndWait(pid_t pid) {
   if (pid <= 0) {
     return;
@@ -444,6 +455,7 @@ void TestDaemonFlowAndMaliciousInputs() {
   const fs::path call_log = temp_dir / "fake-criu.calls.log";
   const fs::path env_log = temp_dir / "fake-criu.env.log";
   const fs::path restore_tty_log = temp_dir / "fake-criu.restore-tty.log";
+  const fs::path restored_process_tty_log = temp_dir / "fake-criu.restored-process-tty.log";
   const fs::path fake_criu = temp_dir / "fake-criu.sh";
   const fs::path fake_criu_ns = temp_dir / "criu-ns";
   const fs::path daemon_bin = Runfile("src/csrc/snapshotd");
@@ -458,6 +470,7 @@ void TestDaemonFlowAndMaliciousInputs() {
       "call_log='" + call_log.string() + "'\n"
       "env_log='" + env_log.string() + "'\n"
       "restore_tty_log='" + restore_tty_log.string() + "'\n"
+      "restored_process_tty_log='" + restored_process_tty_log.string() + "'\n"
       "{\n"
       "  printf 'argv0=%s\\n' \"$0\"\n"
       "  for arg in \"$@\"; do printf 'arg=%s\\n' \"$arg\"; done\n"
@@ -502,7 +515,8 @@ void TestDaemonFlowAndMaliciousInputs() {
       "  printf 'stderr=' >&9\n"
       "  readlink /proc/$$/fd/2 >&9\n"
       "  if [ -n \"$pidfile\" ]; then\n"
-      "    '" + restore_stub_bin.string() + "' --pidfile \"$pidfile\"\n"
+      "    '" + restore_stub_bin.string() +
+          "' --pidfile \"$pidfile\" --tty-log \"$restored_process_tty_log\"\n"
       "  fi\n"
       "fi\n"
       );
@@ -663,6 +677,9 @@ void TestDaemonFlowAndMaliciousInputs() {
     Expect(restored_pid > 1, "restore pidfile was not propagated");
     WaitForPath(restore_tty_log, std::chrono::milliseconds(5000));
     const auto restore_tty_map = ParseOutputMap(snapshotd::ReadTextFile(restore_tty_log));
+    WaitForPath(restored_process_tty_log, std::chrono::milliseconds(5000));
+    const auto restored_process_tty_map =
+        ParseOutputMap(snapshotd::ReadTextFile(restored_process_tty_log));
     const std::string& caller_tty_nr = restore_result.caller_tty_nr;
     Expect(LoggedTtyTargetMatches(restore_tty_map, "stdin", restore_result.tty_path),
            "restore should bind stdin to the controlling tty device");
@@ -679,6 +696,22 @@ void TestDaemonFlowAndMaliciousInputs() {
              "restore should claim the caller's controlling terminal");
       Expect(restore_tty_map.at("tpgid") == restore_tty_map.at("pgrp"),
              "host restore should control the tty foreground process group");
+    }
+    Expect(restored_process_tty_map.at("pid") == std::to_string(restored_pid),
+           "restored process tty log should match the adopted pid");
+    Expect(restored_process_tty_map.at("tty_nr") == restore_tty_map.at("tty_nr"),
+           "restored process should inherit the wrapper tty state");
+    Expect(LoggedTtyTargetMatches(restored_process_tty_map, "stdin", restore_result.tty_path),
+           "restored process stdin should inherit the caller's terminal");
+    Expect(LoggedTtyTargetMatches(restored_process_tty_map, "stdout", restore_result.tty_path),
+           "restored process stdout should inherit the caller's terminal");
+    Expect(LoggedTtyTargetMatches(restored_process_tty_map, "stderr", restore_result.tty_path),
+           "restored process stderr should inherit the caller's terminal");
+    if (restored_process_tty_map.at("tty_nr") != "0") {
+      Expect(restored_process_tty_map.at("tty_nr") == caller_tty_nr,
+             "restored process should inherit the caller's controlling terminal");
+      Expect(restored_process_tty_map.at("tpgid") == restored_process_tty_map.at("pgrp"),
+             "restored process should own the tty foreground process group");
     }
 
     CommandResult status_after_restore =
@@ -816,6 +849,110 @@ void TestWorkerTimeoutCancelsHungOperation() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+void TestWorkerTimeoutCancelsHungRestoreOperation() {
+  const fs::path temp_dir = MakeTempDir("restoretimeoutit");
+  const fs::path socket_path = temp_dir / "snapshotd.sock";
+  const fs::path state_dir = temp_dir / "state";
+  const fs::path ready_file = temp_dir / "ready";
+  const fs::path config_path = temp_dir / "snapshotd.conf";
+  const fs::path fake_criu = temp_dir / "fake-criu-restore-timeout.sh";
+  const fs::path fake_criu_ns = temp_dir / "criu-ns";
+  const fs::path restore_child_pid_file = temp_dir / "restore-child.pid";
+  const fs::path daemon_bin = Runfile("src/csrc/snapshotd");
+  const fs::path worker_bin = Runfile("src/csrc/snapshot-worker");
+  const fs::path ctl_bin = Runfile("src/csrc/snapshotctl");
+
+  WriteExecutable(
+      fake_criu,
+      "#!/usr/bin/env bash\n"
+      "set -eu\n"
+      "mode=\"${1:-}\"\n"
+      "restore_child_pid_file='" + restore_child_pid_file.string() + "'\n"
+      "logfile=''\n"
+      "while [ \"$#\" -gt 0 ]; do\n"
+      "  if [ \"$1\" = '--log-file' ]; then\n"
+      "    logfile=\"$2\"\n"
+      "    shift 2\n"
+      "    continue\n"
+      "  fi\n"
+      "  shift\n"
+      "done\n"
+      "if [ -n \"$logfile\" ]; then\n"
+      "  mkdir -p \"$(dirname \"$logfile\")\"\n"
+      "  printf '%s\\n' 'timeout log' > \"$logfile\"\n"
+      "fi\n"
+      "if [ \"$mode\" = 'restore' ]; then\n"
+      "  printf '%s\\n' \"$BASHPID\" > \"$restore_child_pid_file\"\n"
+      "  trap '' TERM\n"
+      "  while :; do sleep 1; done\n"
+      "fi\n");
+  WriteExecutable(fake_criu_ns, snapshotd::ReadTextFile(fake_criu));
+  snapshotd::WriteTextFile(
+      config_path,
+      "# comment to exercise config-file parsing\n"
+      "state_dir=" + state_dir.string() + "\n"
+      "criu_bin=" + fake_criu.string() + "\n"
+      "criu_ns_bin=" + fake_criu_ns.string() + "\n"
+      "worker_timeout_seconds=5\n",
+      0644,
+      0700);
+
+  const pid_t daemon_pid = SpawnDaemon(
+      daemon_bin,
+      socket_path,
+      state_dir,
+      worker_bin,
+      fake_criu,
+      fake_criu_ns,
+      ready_file,
+      {},
+      1,
+      config_path);
+  pid_t job_pid = 0;
+  try {
+    WaitForPath(ready_file, std::chrono::milliseconds(5000));
+    WaitForPath(socket_path, std::chrono::milliseconds(5000));
+
+    CommandResult run_result = RunCommand(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "run", "--", "/bin/sleep", "30"});
+    Expect(run_result.exit_code == 0, "run command failed");
+    const auto run_map = ParseOutputMap(run_result.stdout_text);
+    const std::string job_id = run_map.at("job_id");
+    job_pid = static_cast<pid_t>(std::stol(run_map.at("pid")));
+
+    CommandResult checkpoint_result =
+        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "checkpoint", job_id});
+    Expect(checkpoint_result.exit_code == 0, "checkpoint before restore timeout failed");
+
+    TtyCommandResult restore_result = RunCommandWithControllingTty(
+        {ctl_bin.string(), "--socket-path", socket_path.string(), "restore", job_id});
+    Expect(restore_result.exit_code != 0, "hung restore should fail after timeout");
+    Expect(restore_result.output_text.find("timed out") != std::string::npos,
+           "restore timeout should be reported to the caller");
+    WaitForPath(restore_child_pid_file, std::chrono::milliseconds(5000));
+    const pid_t restore_child_pid =
+        static_cast<pid_t>(std::stol(snapshotd::ReadTextFile(restore_child_pid_file)));
+    WaitForProcessExit(restore_child_pid, std::chrono::milliseconds(5000));
+
+    CommandResult status_result =
+        RunCommand({ctl_bin.string(), "--socket-path", socket_path.string(), "status", job_id});
+    Expect(status_result.exit_code == 0, "daemon should remain responsive after restore timeout");
+  } catch (...) {
+    if (job_pid > 1) {
+      BestEffortTerminate(job_pid);
+    }
+    KillAndWait(daemon_pid);
+    snapshotd::RemoveTree(temp_dir);
+    throw;
+  }
+
+  if (job_pid > 1) {
+    BestEffortTerminate(job_pid);
+  }
+  KillAndWait(daemon_pid);
+  snapshotd::RemoveTree(temp_dir);
+}
+
 void TestDaemonPrunesOlderCheckpointsAfterNewDump() {
   const fs::path temp_dir = MakeTempDir("pruneit");
   const fs::path socket_path = temp_dir / "snapshotd.sock";
@@ -925,6 +1062,7 @@ int main() {
   try {
     TestDaemonFlowAndMaliciousInputs();
     TestWorkerTimeoutCancelsHungOperation();
+    TestWorkerTimeoutCancelsHungRestoreOperation();
     TestDaemonPrunesOlderCheckpointsAfterNewDump();
     return 0;
   } catch (const std::exception& error) {

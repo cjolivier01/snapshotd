@@ -35,7 +35,9 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr auto kNamespaceRestoreTimeout = std::chrono::seconds(20);
+constexpr auto kHostRestoreTerminationGrace = std::chrono::milliseconds(500);
 volatile sig_atomic_t g_host_restore_child_pgid = -1;
+volatile sig_atomic_t g_host_restore_termination_signal = 0;
 
 void PrepareControllingTty(int client_tty_fd);
 
@@ -135,12 +137,8 @@ int ForkExec(const std::vector<std::string>& command) {
   return 0;
 }
 
-void ForwardTerminationToHostRestoreChild(int signal_number) {
-  const pid_t child_pgid = static_cast<pid_t>(g_host_restore_child_pgid);
-  if (child_pgid > 0) {
-    (void)!kill(-child_pgid, signal_number);
-  }
-  _exit(128 + signal_number);
+void RequestHostRestoreTermination(int signal_number) {
+  g_host_restore_termination_signal = signal_number;
 }
 
 int ForkExecRestoreWithControllingTty(
@@ -168,12 +166,13 @@ int ForkExecRestoreWithControllingTty(
 
   struct sigaction forward_action {};
   sigemptyset(&forward_action.sa_mask);
-  forward_action.sa_handler = ForwardTerminationToHostRestoreChild;
+  forward_action.sa_handler = RequestHostRestoreTermination;
 
   struct sigaction old_term {};
   struct sigaction old_int {};
   struct sigaction old_hup {};
   g_host_restore_child_pgid = child;
+  g_host_restore_termination_signal = 0;
   if (sigaction(SIGTERM, &forward_action, &old_term) != 0 ||
       sigaction(SIGINT, &forward_action, &old_int) != 0 ||
       sigaction(SIGHUP, &forward_action, &old_hup) != 0) {
@@ -182,24 +181,59 @@ int ForkExecRestoreWithControllingTty(
   }
 
   int status = 0;
-  while (waitpid(child, &status, 0) < 0) {
-    if (errno == EINTR) {
+  bool forwarded_termination = false;
+  auto termination_deadline = std::chrono::steady_clock::time_point::max();
+  while (true) {
+    const int wait_flags =
+        (g_host_restore_termination_signal != 0 || forwarded_termination) ? WNOHANG : 0;
+    const pid_t waited = waitpid(child, &status, wait_flags);
+    if (waited == child) {
+      break;
+    }
+    if (waited == 0) {
+      if (!forwarded_termination) {
+        const int signal_number =
+            g_host_restore_termination_signal != 0 ? g_host_restore_termination_signal : SIGTERM;
+        (void)!kill(-child, signal_number);
+        forwarded_termination = true;
+        termination_deadline = std::chrono::steady_clock::now() + kHostRestoreTerminationGrace;
+      } else if (std::chrono::steady_clock::now() >= termination_deadline) {
+        (void)!kill(-child, SIGKILL);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
       continue;
     }
-    const int saved_errno = errno;
-    g_host_restore_child_pgid = -1;
-    (void)!sigaction(SIGTERM, &old_term, nullptr);
-    (void)!sigaction(SIGINT, &old_int, nullptr);
-    (void)!sigaction(SIGHUP, &old_hup, nullptr);
-    errno = saved_errno;
-    ThrowErrno("waitpid");
+    if (waited < 0 && errno == EINTR) {
+      if (g_host_restore_termination_signal != 0 && !forwarded_termination) {
+        (void)!kill(-child, g_host_restore_termination_signal);
+        forwarded_termination = true;
+        termination_deadline = std::chrono::steady_clock::now() + kHostRestoreTerminationGrace;
+      }
+      continue;
+    }
+    if (waited < 0) {
+      const int saved_errno = errno;
+      g_host_restore_child_pgid = -1;
+      g_host_restore_termination_signal = 0;
+      (void)!sigaction(SIGTERM, &old_term, nullptr);
+      (void)!sigaction(SIGINT, &old_int, nullptr);
+      (void)!sigaction(SIGHUP, &old_hup, nullptr);
+      errno = saved_errno;
+      ThrowErrno("waitpid");
+    }
   }
 
   g_host_restore_child_pgid = -1;
+  const int termination_signal = g_host_restore_termination_signal;
+  g_host_restore_termination_signal = 0;
   (void)!sigaction(SIGTERM, &old_term, nullptr);
   (void)!sigaction(SIGINT, &old_int, nullptr);
   (void)!sigaction(SIGHUP, &old_hup, nullptr);
 
+  if (termination_signal != 0) {
+    throw std::runtime_error(
+        "worker child command interrupted by signal " + std::to_string(termination_signal));
+  }
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
     throw std::runtime_error("worker child command failed: " + JoinCommandLine(command));
   }
