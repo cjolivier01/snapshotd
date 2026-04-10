@@ -6,10 +6,14 @@ BUILD_TARGETS := \
 PACKAGE_NAME := snapshotd_0.1.0_amd64.deb
 PACKAGE_BAZEL := bazel-bin/$(PACKAGE_NAME)
 PACKAGE_TMP := /tmp/$(PACKAGE_NAME)
+PACKAGE_LOCAL := $(CURDIR)/$(PACKAGE_NAME)
+DOXYGEN ?= doxygen
+DOXYFILE := docs/Doxyfile
+DOCS_HTML_INDEX := build/docs/doxygen/html/index.html
 
 .DEFAULT_GOAL := help
 
-.PHONY: help debug release install clean distclean
+.PHONY: help debug release deb docs install clean distclean
 
 help:
 	@printf "\n"
@@ -20,6 +24,8 @@ help:
 	@printf "%s\n" "-----"
 	@printf "  %-12s %s\n" "debug" "Build snapshotd binaries and Debian package with Bazel debug settings (-c dbg)."
 	@printf "  %-12s %s\n" "release" "Build snapshotd binaries and Debian package with Bazel optimized settings (-c opt)."
+	@printf "  %-12s %s\n" "deb" "Build the release Debian package and copy it to the repository root."
+	@printf "  %-12s %s\n" "docs" "Generate Doxygen HTML docs under build/docs/doxygen/html."
 	@printf "\n"
 	@printf "%s\n" "Install"
 	@printf "%s\n" "-------"
@@ -40,6 +46,20 @@ debug:
 
 release:
 	bazel build -c opt $(BUILD_TARGETS)
+
+deb:
+	bazel build -c opt //:snapshotd_deb
+	install -m 0644 $(PACKAGE_BAZEL) $(PACKAGE_LOCAL)
+	@printf "%s\n" "Copied Debian package to $(PACKAGE_LOCAL)"
+
+docs:
+	@command -v $(DOXYGEN) >/dev/null 2>&1 || { \
+		printf "%s\n" "doxygen is required for 'make docs'."; \
+		printf "%s\n" "Install it with 'conda install -c conda-forge doxygen' or your system package manager."; \
+		exit 1; \
+	}
+	$(DOXYGEN) $(DOXYFILE)
+	@printf "%s\n" "Generated HTML docs: $(DOCS_HTML_INDEX)"
 
 install: release
 	install -m 0644 $(PACKAGE_BAZEL) $(PACKAGE_TMP)

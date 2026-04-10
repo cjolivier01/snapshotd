@@ -38,6 +38,7 @@ under `/var/lib/snapshotd`, and never exposes a raw CRIU argv tunnel.
 ## Design
 
 - Main design doc: [docs/safe-root-criu-broker-design.md](docs/safe-root-criu-broker-design.md)
+- Generated API/reference docs entry point after `make docs`: `build/docs/doxygen/html/index.html`
 - Debian packaging notes: [packaging/debian/usr/share/doc/snapshotd/README.Debian](packaging/debian/usr/share/doc/snapshotd/README.Debian)
 
 The short version for IT/security review:
@@ -107,15 +108,36 @@ Build the Debian package:
 bazel build //:snapshotd_deb
 ```
 
+Or build it and copy the resulting `.deb` into the repository root:
+
+```bash
+make deb
+```
+
 There is also a small top-level `Makefile` for common workflows:
 
 ```bash
 make
 make debug
 make release
+make deb
+make docs
 make install
 make clean
 make distclean
+```
+
+Generate the Doxygen documentation:
+
+```bash
+make docs
+```
+
+That target writes HTML under `build/docs/doxygen/html`. It requires `doxygen`
+on `PATH`; a practical install path on environments like this one is:
+
+```bash
+conda install -c conda-forge doxygen
 ```
 
 ## Test

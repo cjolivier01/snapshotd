@@ -14,32 +14,65 @@
 
 namespace snapshotd {
 
+/**
+ * @defgroup store_api Metadata Store
+ * @brief Broker-owned filesystem layout for jobs, checkpoints, and exports.
+ *
+ * The store is the authority for which state is private restore input and which
+ * state is only a read-only compatibility export. That distinction is central
+ * to the broker's security model.
+ *
+ * @see @ref safe_root_criu_broker_design
+ * @{
+ */
+
 /** @brief Broker-owned metadata for one managed process tree. */
 struct JobRecord {
+  /** @brief Stable broker-generated identifier used by callers after `run`. */
   std::string job_id;
+  /** @brief Real UID that owns the managed job. */
   uid_t owner_uid = 0;
+  /** @brief Real GID that owns the managed job. */
   gid_t owner_gid = 0;
+  /** @brief Current managed host PID for the job. */
   pid_t pid = 0;
+  /** @brief `/proc/<pid>/stat` start-time token used to defend against PID reuse. */
   std::string start_time_ticks;
+  /** @brief Absolute executable path launched for the managed job. */
   std::string executable;
+  /** @brief Working directory used when the managed job was launched. */
   std::string cwd;
+  /** @brief Human-readable argv string for status reporting and auditability. */
   std::string command_line;
+  /** @brief Current broker view of job liveness and safety. */
   std::string state;
+  /** @brief Unix timestamp recorded when the managed job record was created. */
   std::string created_at;
+  /** @brief Most recent checkpoint selected as the default restore target. */
   std::string latest_checkpoint;
 };
 
 /** @brief Broker-owned metadata for one checkpoint of a managed job. */
 struct CheckpointRecord {
+  /** @brief Stable broker-generated identifier for one checkpoint. */
   std::string checkpoint_id;
+  /** @brief Owning job identifier. */
   std::string job_id;
+  /** @brief Lifecycle state such as `created`, `ready`, or `restored`. */
   std::string state;
+  /** @brief Unix timestamp recorded when the checkpoint record was created. */
   std::string created_at;
+  /** @brief Unix timestamp of the most recent successful restore. */
   std::string last_restored_at;
+  /** @brief Count of successful restores performed from this checkpoint. */
   std::string restore_count;
+  /** @brief Total private-plus-export size recorded for retention decisions. */
   std::string size_bytes;
+  /** @brief Private dump log path produced by the worker. */
   std::string dump_log;
+  /** @brief Private restore log path produced by the worker. */
   std::string restore_log;
+  /** @brief Restored host PID recorded after successful restore, if any. */
   std::string restored_pid;
 };
 
@@ -128,6 +161,8 @@ class Store {
 
 /** @brief Reject access to jobs that do not belong to the connected peer UID. */
 void AuthorizeJobAccess(const JobRecord& job, uid_t peer_uid);
+
+/** @} */
 
 }  // namespace snapshotd
 

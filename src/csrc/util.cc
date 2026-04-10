@@ -1,5 +1,11 @@
 /** @file
  *  @brief Shared filesystem, process, and string helpers for snapshotd.
+ *
+ *  @details
+ *  Several helpers in this file are security-sensitive rather than merely
+ *  convenient: process identity checks guard against PID reuse, executable
+ *  validation blocks setuid/setgid and file-capability launch paths, and path
+ *  utilities help keep worker state confined to broker-owned directories.
  */
 
 #include "src/csrc/util.h"
