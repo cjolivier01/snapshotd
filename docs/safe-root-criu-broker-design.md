@@ -470,6 +470,45 @@ That reinforces the same policy choice `snapshotd` already makes: if GPU-aware
 checkpoint/restore is added, it still belongs behind the broker boundary rather
 than as a raw privileged PID or argv tunnel.
 
+## TTY Passthrough For Restored Processes
+
+After CRIU restore the worker's stdin/stdout/stderr point to whatever
+terminal the worker inherited during snapshot build — typically a private PTY
+fabricated by `PrepareControllingTty`.  That PTY is not the caller's terminal,
+so the restored process cannot interact with the user.
+
+### SCM_RIGHTS Fd Passing
+
+The protocol supports optional file-descriptor passthrough via `SCM_RIGHTS`
+ancillary data on the Unix socket:
+
+1. The client opens its own terminal (`/dev/pts/N`) and sends the fd alongside
+   the `restore` request using `SendMessageWithFd`.
+2. The daemon receives the fd via `ReceiveMessageWithFd` and passes it to
+   the worker subprocess as `--tty-fd <N>`.
+3. The worker `dup2`s the fd onto fds 0/1/2 before invoking CRIU so that
+   `--shell-job` restore inherits the caller's actual terminal.
+
+This is backward compatible.  Clients that do not send an fd (including older
+`snapshotctl` binaries and the plain `SendMessage` path) continue to work —
+the worker fabricates a private PTY as before.
+
+### Security Properties
+
+- The passed fd is kernel-authenticated: `recvmsg` delivers a
+  kernel-duplicated copy, not a raw user-supplied path.
+- The daemon does not open arbitrary device paths.
+- The worker validates `isatty()` before using the fd.
+- The fd is `close()`d by the daemon after the worker exits.
+
+### Debugpy (VSCode Debugger) Restore
+
+The `snapshot` Python runtime can propagate VSCode debugpy connection
+information across the checkpoint/restore boundary so the restored process
+attaches to the same debug session.  See
+[`snapshot/docs/debugpy-restore-design.md`](https://github.com/cjolivier01/snapshot/blob/master/docs/debugpy-restore-design.md)
+for the full design.
+
 ## Systemd Packaging
 
 The Debian package installs:
