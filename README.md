@@ -38,7 +38,7 @@ under `/var/lib/snapshotd`, and never exposes a raw CRIU argv tunnel.
 ## Design
 
 - Main design doc: [docs/safe-root-criu-broker-design.md](docs/safe-root-criu-broker-design.md)
-- Generated API/reference docs entry point after `make docs`: `build/docs/doxygen/html/index.html`
+- Generated API/reference docs entry point after `make docs`: `build/docs/site/index.html`
 - Debian packaging notes: [packaging/debian/usr/share/doc/snapshotd/README.Debian](packaging/debian/usr/share/doc/snapshotd/README.Debian)
 
 The short version for IT/security review:
@@ -127,14 +127,20 @@ make clean
 make distclean
 ```
 
-Generate the Doxygen documentation:
+Generate the documentation site:
 
 ```bash
 make docs
 ```
 
-That target writes HTML under `build/docs/doxygen/html`. It requires `doxygen`
-on `PATH`; a practical install path on environments like this one is:
+That target writes HTML under `build/docs/site`.
+
+If `doxygen` is available, `make docs` uses it directly. If `doxygen` is not
+available but both `clang-doc` and `mkdocs` are on `PATH`, `make docs` falls
+back to a `clang-doc` plus `mkdocs` pipeline so docs generation still works on
+lighter developer environments.
+
+A practical `doxygen` install path on environments like this one is:
 
 ```bash
 conda install -c conda-forge doxygen
@@ -146,6 +152,12 @@ Run the C++ test suite:
 
 ```bash
 bazel test //tests/csrc:protocol_store_test //tests/csrc:daemon_integration_test
+```
+
+Run the documentation tooling smoke test:
+
+```bash
+bazel test //tests/csrc:docs_tooling_test
 ```
 
 The integration test exercises the broker protocol, managed jobs, fixed worker

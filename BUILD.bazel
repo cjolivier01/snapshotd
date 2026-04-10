@@ -1,3 +1,17 @@
+filegroup(
+    name = "docs_inputs",
+    srcs = [
+        "README.md",
+        "docs/Doxyfile",
+        "docs/design-reference.dox",
+        "docs/doxygen-main.dox",
+        "docs/generate_docs.sh",
+        "docs/it-review-guide.dox",
+        "docs/safe-root-criu-broker-design.md",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 genrule(
     name = "snapshotd_deb",
     srcs = [

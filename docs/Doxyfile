@@ -1,7 +1,7 @@
 PROJECT_NAME           = "snapshotd"
 PROJECT_BRIEF          = "Privileged CRIU broker with a narrow, policy-enforced API"
 PROJECT_NUMBER         = "0.1.0"
-OUTPUT_DIRECTORY       = build/docs/doxygen
+OUTPUT_DIRECTORY       = build/docs
 CREATE_SUBDIRS         = NO
 ALLOW_UNICODE_NAMES    = NO
 OUTPUT_LANGUAGE        = English
@@ -64,7 +64,7 @@ REFERENCES_RELATION    = YES
 REFERENCES_LINK_SOURCE = YES
 ALPHABETICAL_INDEX     = YES
 GENERATE_HTML          = YES
-HTML_OUTPUT            = html
+HTML_OUTPUT            = site
 HTML_FILE_EXTENSION    = .html
 HTML_COLORSTYLE        = AUTO_LIGHT
 HTML_DYNAMIC_MENUS     = YES

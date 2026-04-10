@@ -6,6 +6,14 @@ COMMON_COPTS = [
     "-Wextra",
 ]
 
+filegroup(
+    name = "docs_sources",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+)
+
 cc_library(
     name = "snapshotd_lib",
     srcs = [
