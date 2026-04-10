@@ -48,6 +48,35 @@ The short version for IT/security review:
 - the worker clears the environment and forces `--no-default-config`
 - the broker follows the same privilege-separation model used by Docker and Podman, but for managed checkpoint jobs instead of containers
 
+## Storage And Retention
+
+Authoritative privileged checkpoints are consolidated under `/var/lib/snapshotd`
+in a root-owned private tree. User-readable compatibility exports live in a
+separate broker-owned read-only exports tree under the same state root.
+
+That is different from rootless `snapshot` autosnapshots, which live in the
+caller-selected runtime directory.
+
+The retention design for `snapshotd` therefore needs:
+
+- a global machine budget for `/var/lib/snapshotd`
+- optional per-user quotas
+- age-based pruning
+- restore-frequency-aware eviction
+
+Those controls are implemented in the daemon config:
+
+- `max_checkpoint_age_seconds`
+- `min_keep_checkpoints_per_job`
+- `max_keep_checkpoints_per_job`
+- `max_bytes_per_user`
+- `max_bytes_total`
+
+The broker updates checkpoint usage metadata after successful restores and
+prunes opportunistically after checkpoint/restore requests. The detailed design
+is in [docs/safe-root-criu-broker-design.md](docs/safe-root-criu-broker-design.md),
+under `Retention, Cleanup, And Eviction`.
+
 ## Layout
 
 - `src/csrc/`: C++ daemon, worker, client, and protocol code
@@ -99,7 +128,7 @@ bazel test //tests/csrc:protocol_store_test //tests/csrc:daemon_integration_test
 
 The integration test exercises the broker protocol, managed jobs, fixed worker
 invocation, worker timeouts, response-write disconnect handling, and rejection
-of several malicious inputs.
+of several malicious inputs, plus opportunistic retention pruning.
 
 ## Install
 
@@ -152,6 +181,11 @@ That file controls daemon-owned settings such as:
 - `criu_bin`
 - `criu_ns_bin`
 - `worker_timeout_seconds`
+- `max_checkpoint_age_seconds`
+- `min_keep_checkpoints_per_job`
+- `max_keep_checkpoints_per_job`
+- `max_bytes_per_user`
+- `max_bytes_total`
 
 Socket settings such as `/run/snapshotd.sock` and the `snapshot-users` group
 remain systemd socket-unit settings, not daemon config-file settings.

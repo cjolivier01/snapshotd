@@ -151,6 +151,120 @@ The important boundary is:
 - restore uses the broker-owned checkpoint, not the exported compatibility copy
 - the exported copy exists only for diagnostics and compatibility
 
+## Retention, Cleanup, And Eviction
+
+The broker has a different cleanup problem than rootless generated-bootstrap
+autosnapshots.
+
+For privileged brokered flows, the authoritative checkpoints are consolidated
+under a root-owned global state root:
+
+```text
+/var/lib/snapshotd/
+  <uid>/
+    jobs/
+      <job-id>/
+        checkpoints/
+          <checkpoint-id>/
+    exports/
+      <job-id>/
+        <checkpoint-id>/
+```
+
+That means retention needs both:
+
+- a global machine budget for `/var/lib/snapshotd`
+- optional per-user quotas under `/var/lib/snapshotd/<uid>/...`
+
+The root-owned `jobs/` tree is the authoritative restore input. The user-facing
+`exports/` tree is a broker-owned read-only compatibility copy and is pruned
+together with the authoritative checkpoint it mirrors.
+
+### Persisted Metadata
+
+Each authoritative checkpoint now carries explicit retention metadata in
+broker-owned metadata rather than relying on filesystem access times.
+
+Implemented fields:
+
+- `created_at`
+- `last_restored_at`
+- `restore_count`
+- `size_bytes`
+- `job_id`
+- `checkpoint_id`
+
+Recommended derived values:
+
+- total bytes per checkpoint, including its export copy
+- total bytes per job
+- total bytes per UID subtree
+- total bytes under the entire state root
+
+`last_restored_at` and `restore_count` should be updated only after a
+successful brokered restore. Filesystem `atime` should not be used.
+
+### Implemented Knobs
+
+The broker exposes retention controls in daemon-owned config in
+`/etc/snapshotd/snapshotd.conf`:
+
+- `max_checkpoint_age_seconds`
+- `min_keep_checkpoints_per_job`
+- `max_keep_checkpoints_per_job`
+- `max_bytes_per_user`
+- `max_bytes_total`
+
+These knobs are intentionally daemon-owned. Unprivileged callers should not be
+able to weaken the host retention policy through request fields.
+
+### Eviction Order
+
+Retention is applied in this order:
+
+1. keep the job's latest checkpoint and the request's current checkpoint as a floor
+2. keep enough newest checkpoints to satisfy `min_keep_checkpoints_per_job`
+3. delete checkpoints older than `max_checkpoint_age_seconds`
+4. enforce `max_keep_checkpoints_per_job`
+5. if still over a per-user or global byte budget, evict additional checkpoints
+   until back under budget
+
+When budget enforcement requires a choice, the eviction priority should be:
+
+1. oldest `last_restored_at`
+2. lowest `restore_count`
+3. largest `size_bytes`
+4. oldest `created_at`
+
+This gives the operator all three desired controls:
+
+- age
+- frequency of use
+- total space consumed
+
+### Operational Model
+
+Cleanup currently runs opportunistically after successful checkpoint and
+restore operations. That keeps the root-owned state bounded without exposing
+retention control to unprivileged callers.
+
+All cleanup decisions operate only on broker-owned metadata and broker-owned
+paths. User workspaces and exported compatibility mirrors are not the source of
+truth for deletion decisions.
+
+### Relationship To `snapshot`
+
+This broker policy is distinct from rootless autosnapshot cleanup:
+
+- `snapshot` rootless autosnapshots are per-runtime-dir user state
+- `snapshotd` authoritative checkpoints are consolidated root-owned machine
+  state
+
+The two systems therefore need different quota scopes:
+
+- per-runtime-dir quotas for rootless autosnapshots
+- global and per-UID quotas for broker-owned checkpoints
+
 ## Fixed CRIU Invocation
 
 The worker constructs CRIU argv internally. Users do not get a raw CRIU command

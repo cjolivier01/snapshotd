@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <ctime>
+#include <vector>
 #include <map>
 #include <stdexcept>
 
@@ -51,6 +52,18 @@ CheckpointRecord ParseCheckpointRecord(const std::map<std::string, std::string>&
   record.job_id = data.at("job_id");
   record.state = data.at("state");
   record.created_at = data.at("created_at");
+  const auto last_restored = data.find("last_restored_at");
+  if (last_restored != data.end()) {
+    record.last_restored_at = last_restored->second;
+  }
+  const auto restore_count = data.find("restore_count");
+  if (restore_count != data.end()) {
+    record.restore_count = restore_count->second;
+  }
+  const auto size_bytes = data.find("size_bytes");
+  if (size_bytes != data.end()) {
+    record.size_bytes = size_bytes->second;
+  }
   record.dump_log = data.at("dump_log");
   record.restore_log = data.at("restore_log");
   const auto restored = data.find("restored_pid");
@@ -172,12 +185,53 @@ JobRecord Store::LoadJob(uid_t owner_uid, const std::string& job_id) const {
   return ParseJobRecord(ParseKeyValueText(ReadTextFile(path)));
 }
 
+std::vector<uid_t> Store::ListUsers() const {
+  std::vector<uid_t> users;
+  if (!PathExists(state_root_)) {
+    return users;
+  }
+  for (const auto& entry : fs::directory_iterator(state_root_)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    try {
+      users.push_back(static_cast<uid_t>(std::stoul(entry.path().filename().string())));
+    } catch (const std::exception&) {
+      continue;
+    }
+  }
+  return users;
+}
+
+std::vector<JobRecord> Store::ListJobs(uid_t owner_uid) const {
+  std::vector<JobRecord> jobs;
+  const fs::path jobs_dir = JobsDir(owner_uid);
+  if (!PathExists(jobs_dir)) {
+    return jobs;
+  }
+  for (const auto& entry : fs::directory_iterator(jobs_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::string job_id = entry.path().filename().string();
+    const fs::path metadata_path = JobMetaPath(owner_uid, job_id);
+    if (!PathExists(metadata_path)) {
+      continue;
+    }
+    jobs.push_back(ParseJobRecord(ParseKeyValueText(ReadTextFile(metadata_path))));
+  }
+  return jobs;
+}
+
 CheckpointRecord Store::CreateCheckpoint(const JobRecord& job) const {
   CheckpointRecord record;
   record.checkpoint_id = GenerateId("ckpt");
   record.job_id = job.job_id;
   record.state = "created";
   record.created_at = CurrentTimestamp();
+  record.last_restored_at.clear();
+  record.restore_count = "0";
+  record.size_bytes = "0";
   EnsureDir(UserDir(job.owner_uid), 0755);
   EnsureDir(JobsDir(job.owner_uid), 0700);
   EnsureDir(JobDir(job.owner_uid, job.job_id), 0700);
@@ -204,6 +258,9 @@ void Store::SaveCheckpoint(const JobRecord& job, const CheckpointRecord& checkpo
       {"job_id", checkpoint.job_id},
       {"state", checkpoint.state},
       {"created_at", checkpoint.created_at},
+      {"last_restored_at", checkpoint.last_restored_at},
+      {"restore_count", checkpoint.restore_count},
+      {"size_bytes", checkpoint.size_bytes},
       {"dump_log", checkpoint.dump_log},
       {"restore_log", checkpoint.restore_log},
       {"restored_pid", checkpoint.restored_pid},
@@ -224,6 +281,36 @@ CheckpointRecord Store::LoadCheckpoint(
     throw std::runtime_error("checkpoint not found: " + checkpoint_id);
   }
   return ParseCheckpointRecord(ParseKeyValueText(ReadTextFile(path)));
+}
+
+std::vector<CheckpointRecord> Store::ListCheckpoints(const JobRecord& job) const {
+  std::vector<CheckpointRecord> checkpoints;
+  const fs::path checkpoints_dir = CheckpointsDir(job.owner_uid, job.job_id);
+  if (!PathExists(checkpoints_dir)) {
+    return checkpoints;
+  }
+  for (const auto& entry : fs::directory_iterator(checkpoints_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::string checkpoint_id = entry.path().filename().string();
+    const fs::path metadata_path =
+        CheckpointMetaPath(job.owner_uid, job.job_id, checkpoint_id);
+    if (!PathExists(metadata_path)) {
+      continue;
+    }
+    checkpoints.push_back(ParseCheckpointRecord(ParseKeyValueText(ReadTextFile(metadata_path))));
+  }
+  return checkpoints;
+}
+
+void Store::RemoveCheckpoint(const JobRecord& job, const CheckpointRecord& checkpoint) const {
+  RemoveTree(CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id));
+  const fs::path export_dir =
+      ExportCheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id);
+  if (PathExists(export_dir)) {
+    RemoveTree(export_dir);
+  }
 }
 
 std::string Store::ResolveCheckpointId(

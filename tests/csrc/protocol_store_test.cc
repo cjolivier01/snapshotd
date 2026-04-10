@@ -5,10 +5,12 @@
 
 #include <filesystem>
 #include <functional>
+#include <ctime>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
+#include "src/csrc/daemon.h"
 #include "src/csrc/protocol.h"
 #include "src/csrc/store.h"
 #include "src/csrc/util.h"
@@ -155,6 +157,9 @@ void TestStoreSaveLoadAndAuthorization() {
 
   snapshotd::CheckpointRecord checkpoint = store.CreateCheckpoint(loaded);
   checkpoint.state = "ready";
+  checkpoint.restore_count = "2";
+  checkpoint.last_restored_at = "200";
+  checkpoint.size_bytes = "123";
   store.SaveCheckpoint(loaded, checkpoint);
   ExpectNoGroupOrOtherPermissions(
       store.CheckpointDir(loaded.owner_uid, loaded.job_id, checkpoint.checkpoint_id),
@@ -168,6 +173,9 @@ void TestStoreSaveLoadAndAuthorization() {
   const snapshotd::CheckpointRecord reloaded =
       store.LoadCheckpoint(loaded, checkpoint.checkpoint_id);
   Expect(reloaded.checkpoint_id == checkpoint.checkpoint_id, "checkpoint id mismatch");
+  Expect(reloaded.restore_count == "2", "checkpoint restore_count mismatch");
+  Expect(reloaded.last_restored_at == "200", "checkpoint last_restored_at mismatch");
+  Expect(reloaded.size_bytes == "123", "checkpoint size_bytes mismatch");
   Expect(store.ResolveCheckpointId(loaded, "") == checkpoint.checkpoint_id,
          "latest checkpoint resolution mismatch");
   const fs::path export_dir =
@@ -180,6 +188,127 @@ void TestStoreSaveLoadAndAuthorization() {
   ExpectThrows(
       [&]() { snapshotd::AuthorizeJobAccess(loaded, 2002); },
       "authorization mismatch");
+
+  snapshotd::RemoveTree(temp_dir);
+}
+
+void TestPruneCheckpointsRemovesExpiredEntries() {
+  const fs::path temp_dir = MakeTempDir("pruneage");
+  snapshotd::Store store(temp_dir);
+  store.Initialize();
+
+  snapshotd::JobRecord job =
+      store.CreateJob(1001, 1001, 2222, "10", "/bin/sleep", "/tmp", "/bin/sleep 30");
+  store.SaveJob(job);
+
+  snapshotd::CheckpointRecord expired = store.CreateCheckpoint(job);
+  snapshotd::WriteTextFile(
+      store.CheckpointDir(job.owner_uid, job.job_id, expired.checkpoint_id) / "images" / "old.bin",
+      std::string(64, 'o'));
+  expired.state = "ready";
+  expired.created_at = "1";
+  store.SaveCheckpoint(job, expired);
+
+  snapshotd::CheckpointRecord latest = store.CreateCheckpoint(job);
+  snapshotd::WriteTextFile(
+      store.CheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id) / "images" / "new.bin",
+      std::string(64, 'n'));
+  latest.state = "ready";
+  latest.created_at = std::to_string(static_cast<long long>(std::time(nullptr)));
+  store.SaveCheckpoint(job, latest);
+
+  job.latest_checkpoint = latest.checkpoint_id;
+  store.SaveJob(job);
+
+  snapshotd::DaemonConfig config;
+  config.max_checkpoint_age_seconds = 30;
+  config.min_keep_checkpoints_per_job = 1;
+  config.max_keep_checkpoints_per_job = 5;
+
+  const int removed = snapshotd::PruneCheckpoints(config, &store);
+  Expect(removed == 1, "expected one expired checkpoint to be pruned");
+  Expect(!snapshotd::PathExists(
+             store.CheckpointDir(job.owner_uid, job.job_id, expired.checkpoint_id)),
+         "expired checkpoint directory should be removed");
+  Expect(snapshotd::PathExists(
+             store.CheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id)),
+         "latest checkpoint should be retained");
+
+  snapshotd::RemoveTree(temp_dir);
+}
+
+void TestPruneCheckpointsPrefersColdEntriesUnderByteBudget() {
+  const fs::path temp_dir = MakeTempDir("prunebudget");
+  snapshotd::Store store(temp_dir);
+  store.Initialize();
+
+  snapshotd::JobRecord job =
+      store.CreateJob(1001, 1001, 3333, "20", "/bin/sleep", "/tmp", "/bin/sleep 30");
+  store.SaveJob(job);
+
+  auto make_checkpoint = [&](const std::string& created_at, char fill) {
+    snapshotd::CheckpointRecord checkpoint = store.CreateCheckpoint(job);
+    snapshotd::WriteTextFile(
+        store.CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id) / "images" /
+            "payload.bin",
+        std::string(128, fill));
+    snapshotd::WriteTextFile(
+        store.ExportCheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id) /
+            "images" / "payload.bin",
+        std::string(128, static_cast<char>(fill + 1)),
+        0644,
+        0755);
+    checkpoint.state = "ready";
+    checkpoint.created_at = created_at;
+    store.SaveCheckpoint(job, checkpoint);
+    checkpoint = store.LoadCheckpoint(job, checkpoint.checkpoint_id);
+    checkpoint.size_bytes = std::to_string(
+        snapshotd::DirectoryTreeSizeBytes(
+            store.CheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id)) +
+        snapshotd::DirectoryTreeSizeBytes(
+            store.ExportCheckpointDir(job.owner_uid, job.job_id, checkpoint.checkpoint_id)));
+    store.SaveCheckpoint(job, checkpoint);
+    return checkpoint;
+  };
+
+  snapshotd::CheckpointRecord cold = make_checkpoint("100", 'c');
+  snapshotd::CheckpointRecord hot = make_checkpoint("200", 'h');
+  hot.restore_count = "4";
+  hot.last_restored_at = "500";
+  store.SaveCheckpoint(job, hot);
+  snapshotd::CheckpointRecord latest = make_checkpoint("300", 'l');
+
+  job.latest_checkpoint = latest.checkpoint_id;
+  store.SaveJob(job);
+
+  const std::uint64_t latest_size =
+      snapshotd::DirectoryTreeSizeBytes(
+          store.CheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id)) +
+      snapshotd::DirectoryTreeSizeBytes(
+          store.ExportCheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id));
+  const std::uint64_t hot_size =
+      snapshotd::DirectoryTreeSizeBytes(
+          store.CheckpointDir(job.owner_uid, job.job_id, hot.checkpoint_id)) +
+      snapshotd::DirectoryTreeSizeBytes(
+          store.ExportCheckpointDir(job.owner_uid, job.job_id, hot.checkpoint_id));
+
+  snapshotd::DaemonConfig config;
+  config.max_checkpoint_age_seconds = 0;
+  config.min_keep_checkpoints_per_job = 1;
+  config.max_keep_checkpoints_per_job = 5;
+  config.max_bytes_total = latest_size + hot_size + 1;
+
+  const int removed = snapshotd::PruneCheckpoints(config, &store);
+  Expect(removed == 1, "expected one cold checkpoint to be pruned under byte budget");
+  Expect(!snapshotd::PathExists(
+             store.CheckpointDir(job.owner_uid, job.job_id, cold.checkpoint_id)),
+         "cold checkpoint should be removed");
+  Expect(snapshotd::PathExists(
+             store.CheckpointDir(job.owner_uid, job.job_id, hot.checkpoint_id)),
+         "hot checkpoint should be retained");
+  Expect(snapshotd::PathExists(
+             store.CheckpointDir(job.owner_uid, job.job_id, latest.checkpoint_id)),
+         "latest checkpoint should be retained");
 
   snapshotd::RemoveTree(temp_dir);
 }
@@ -218,6 +347,8 @@ int main() {
     TestReceiveMessageRejectsOversizedPayload();
     TestSendMessageClosedPeerThrowsInsteadOfSignaling();
     TestStoreSaveLoadAndAuthorization();
+    TestPruneCheckpointsRemovesExpiredEntries();
+    TestPruneCheckpointsPrefersColdEntriesUnderByteBudget();
     TestWriteTextFilePreservesPrivateParentPermissions();
     TestSafeIdValidation();
     return 0;
