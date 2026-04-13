@@ -214,7 +214,7 @@ int CreateSocket(const std::string& socket_path) {
   return fd;
 }
 
-/** @brief Convert a string vector into the mutable argv form required by execve. */
+/** @brief Convert a string vector into the mutable argv form required by `execveat`/`execve`. */
 std::vector<char*> MakeArgv(const std::vector<std::string>& argv_storage) {
   std::vector<char*> argv;
   argv.reserve(argv_storage.size() + 1);
@@ -225,7 +225,7 @@ std::vector<char*> MakeArgv(const std::vector<std::string>& argv_storage) {
   return argv;
 }
 
-/** @brief Convert environment strings into the mutable envp form required by execve. */
+/** @brief Convert environment strings into the mutable envp form required by `execveat`/`execve`. */
 std::vector<char*> MakeEnvp(const std::vector<std::string>& env_storage) {
   std::vector<char*> envp;
   envp.reserve(env_storage.size() + 1);

@@ -101,7 +101,7 @@ generate_with_doxygen() {
   cat >>"$temp_doxy" <<EOF
 OUTPUT_DIRECTORY = "$output_root"
 HTML_OUTPUT = site
-INPUT = "$repo_root/README.md" "$repo_root/docs" "$repo_root/src/csrc"
+INPUT = "$repo_root/README.md" "$repo_root/docs" "$repo_root/src/csrc" "$repo_root/tests/csrc"
 IMAGE_PATH = "$repo_root/docs"
 EOF
 
@@ -121,9 +121,12 @@ generate_with_clang_doc_mkdocs() {
   rm -rf "$clang_output" "$mkdocs_src" "$site_dir"
   mkdir -p "$clang_output" "$mkdocs_src/api" "$mkdocs_src/design"
 
-  mapfile -t source_files < <(find -L "$repo_root/src/csrc" -maxdepth 1 -type f \( -name '*.h' -o -name '*.cc' \) | sort)
+  mapfile -t source_files < <(
+    find -L "$repo_root/src/csrc" "$repo_root/tests/csrc" -maxdepth 1 -type f \
+      \( -name '*.h' -o -name '*.cc' \) | sort
+  )
   if [[ ${#source_files[@]} -eq 0 ]]; then
-    echo "no C++ source files found under $repo_root/src/csrc" >&2
+    echo "no C++ source files found under $repo_root/src/csrc or $repo_root/tests/csrc" >&2
     exit 1
   fi
 

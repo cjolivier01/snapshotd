@@ -332,7 +332,7 @@ std::string ReadTextFile(const fs::path& path) {
 }
 
 /**
- * @brief Write a text file atomically enough for repo metadata use.
+ * @brief Write one text file with explicit modes for broker metadata and exports.
  *
  * Parent directories are created first with @p parent_mode so private state
  * does not need to rely on the caller's umask.

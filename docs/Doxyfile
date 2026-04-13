@@ -47,7 +47,8 @@ WARN_NO_PARAMDOC       = YES
 WARN_AS_ERROR          = NO
 INPUT                  = README.md \
                          docs \
-                         src/csrc
+                         src/csrc \
+                         tests/csrc
 INPUT_ENCODING         = UTF-8
 FILE_PATTERNS          = *.dox \
                          *.md \

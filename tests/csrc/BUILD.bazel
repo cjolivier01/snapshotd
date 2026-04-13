@@ -6,6 +6,15 @@ COMMON_COPTS = [
     "-Wextra",
 ]
 
+filegroup(
+    name = "docs_sources",
+    srcs = [
+        "daemon_integration_test.cc",
+        "protocol_store_test.cc",
+        "restore_stub.cc",
+    ],
+)
+
 cc_binary(
     name = "restore_stub",
     srcs = ["restore_stub.cc"],
@@ -44,5 +53,6 @@ sh_test(
     data = [
         "//:docs_inputs",
         "//src/csrc:docs_sources",
+        ":docs_sources",
     ],
 )
