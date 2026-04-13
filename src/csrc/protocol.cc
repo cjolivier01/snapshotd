@@ -25,6 +25,7 @@ namespace snapshotd {
 
 namespace {
 
+/** @brief Send a complete fixed-size buffer to the control socket. */
 void WriteAll(int fd, const void* buffer, std::size_t size) {
   const char* cursor = static_cast<const char*>(buffer);
   std::size_t remaining = size;
@@ -43,6 +44,7 @@ void WriteAll(int fd, const void* buffer, std::size_t size) {
   }
 }
 
+/** @brief Read an exact number of bytes from the control socket. */
 void ReadAll(int fd, void* buffer, std::size_t size) {
   char* cursor = static_cast<char*>(buffer);
   std::size_t remaining = size;
@@ -62,6 +64,7 @@ void ReadAll(int fd, void* buffer, std::size_t size) {
   }
 }
 
+/** @brief Encode one message as NUL-delimited tokens inside the wire payload. */
 std::string EncodeMessage(const Message& message) {
   if (message.command.empty()) {
     throw std::runtime_error("message command may not be empty");
@@ -83,6 +86,7 @@ std::string EncodeMessage(const Message& message) {
   return output;
 }
 
+/** @brief Decode one length-delimited payload into a Message object. */
 Message DecodeMessage(const std::string& payload) {
   Message message;
   std::size_t cursor = 0;
@@ -114,10 +118,12 @@ Message DecodeMessage(const std::string& payload) {
 
 }  // namespace
 
+/** @brief Append one repeated field to a protocol message. */
 void Message::AddField(const std::string& key, const std::string& value) {
   fields.emplace_back(key, value);
 }
 
+/** @brief Return the first value for @p key or a default when absent. */
 std::string Message::Get(const std::string& key, const std::string& default_value) const {
   for (const auto& [current_key, value] : fields) {
     if (current_key == key) {
@@ -137,6 +143,7 @@ std::vector<std::string> Message::GetAll(const std::string& key) const {
   return values;
 }
 
+/** @brief Read kernel-authenticated peer credentials from a Unix socket. */
 PeerCred GetPeerCred(int fd) {
   struct ucred cred {};
   socklen_t length = sizeof(cred);
@@ -150,6 +157,7 @@ PeerCred GetPeerCred(int fd) {
   return peer;
 }
 
+/** @brief Send one framed control message without ancillary data. */
 void SendMessage(int fd, const Message& message) {
   // Prefix the payload so the receiver can safely read one whole message from a
   // stream socket without guessing message boundaries.
@@ -164,6 +172,7 @@ void SendMessage(int fd, const Message& message) {
   }
 }
 
+/** @brief Receive one framed control message without ancillary data. */
 Message ReceiveMessage(int fd) {
   std::uint32_t size = 0;
   ReadAll(fd, &size, sizeof(size));
@@ -177,6 +186,12 @@ Message ReceiveMessage(int fd) {
   return DecodeMessage(payload);
 }
 
+/**
+ * @brief Send one framed control message with an optional SCM_RIGHTS fd.
+ *
+ * The ancillary descriptor is attached to the first byte of the framed wire
+ * payload so receivers can recover the fd and message together.
+ */
 void SendMessageWithFd(int socket_fd, const Message& message, int ancillary_fd) {
   const std::string payload = EncodeMessage(message);
   if (payload.size() > kMaxControlMessageBytes) {
@@ -235,6 +250,7 @@ void SendMessageWithFd(int socket_fd, const Message& message, int ancillary_fd) 
   }
 }
 
+/** @brief Receive one framed control message and an optional attached fd. */
 Message ReceiveMessageWithFd(int socket_fd, int* received_fd) {
   *received_fd = -1;
 

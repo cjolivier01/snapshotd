@@ -39,8 +39,10 @@ constexpr auto kHostRestoreTerminationGrace = std::chrono::milliseconds(500);
 volatile sig_atomic_t g_host_restore_child_pgid = -1;
 volatile sig_atomic_t g_host_restore_termination_signal = 0;
 
+/** @brief Make stdin/stdout/stderr point at a usable controlling terminal. */
 void PrepareControllingTty(int client_tty_fd);
 
+/** @brief Return true when one CRIU argv vector already contains a given option. */
 bool ContainsArg(const std::vector<std::string>& args, const std::string& token) {
   for (const std::string& arg : args) {
     if (arg == token || arg.rfind(token + "=", 0) == 0) {
@@ -50,6 +52,7 @@ bool ContainsArg(const std::vector<std::string>& args, const std::string& token)
   return false;
 }
 
+/** @brief Append one diagnostic line to a worker-owned log file. */
 void AppendLogLine(const fs::path& path, const std::string& line) {
   EnsureDir(path.parent_path(), 0700);
   std::ofstream output(path, std::ios::out | std::ios::app);
@@ -59,6 +62,7 @@ void AppendLogLine(const fs::path& path, const std::string& line) {
   output << line << "\n";
 }
 
+/** @brief Validate worker config before any privileged CRIU invocation. */
 void ValidateWorkerConfig(const WorkerConfig& config) {
   if (config.operation != "dump" && config.operation != "restore") {
     throw std::runtime_error("unsupported worker operation: " + config.operation);
@@ -90,6 +94,7 @@ void ValidateWorkerConfig(const WorkerConfig& config) {
   }
 }
 
+/** @brief Convert a command vector into exec-ready `argv`. */
 std::vector<char*> MakeArgv(const std::vector<std::string>& command) {
   std::vector<char*> argv;
   argv.reserve(command.size() + 1);
@@ -100,6 +105,7 @@ std::vector<char*> MakeArgv(const std::vector<std::string>& command) {
   return argv;
 }
 
+/** @brief Replace the current process with a scrubbed CRIU command. */
 [[noreturn]] void ExecCommand(const std::vector<std::string>& command) {
   // Privileged CRIU invocations run with a scrubbed environment so ambient
   // variables such as CRIU_CONFIG_FILE cannot steer the worker unexpectedly.
@@ -118,6 +124,7 @@ std::vector<char*> MakeArgv(const std::vector<std::string>& command) {
   _exit(127);
 }
 
+/** @brief Fork, exec one command, and require a successful exit status. */
 int ForkExec(const std::vector<std::string>& command) {
   const pid_t child = fork();
   if (child < 0) {
@@ -137,10 +144,18 @@ int ForkExec(const std::vector<std::string>& command) {
   return 0;
 }
 
+/** @brief Record the signal that should be forwarded to a host-restore subtree. */
 void RequestHostRestoreTermination(int signal_number) {
   g_host_restore_termination_signal = signal_number;
 }
 
+/**
+ * @brief Run host restore with full tty handoff and signal forwarding.
+ *
+ * The child becomes a session leader, claims the caller tty when possible, and
+ * the parent makes sure timeout or interrupt signals terminate the whole
+ * restore process group rather than only the wrapper process.
+ */
 int ForkExecRestoreWithControllingTty(
     const std::vector<std::string>& command,
     int client_tty_fd) {
@@ -240,6 +255,7 @@ int ForkExecRestoreWithControllingTty(
   return 0;
 }
 
+/** @brief Read the immediate child pid list exported by `/proc/<pid>/task/.../children`. */
 std::vector<pid_t> ReadChildPids(pid_t pid) {
   const fs::path path = fs::path("/proc") / PidToString(pid) / "task" / PidToString(pid) /
                         "children";
@@ -254,6 +270,7 @@ std::vector<pid_t> ReadChildPids(pid_t pid) {
   return children;
 }
 
+/** @brief Read the kernel `NSpid` chain for one process from `/proc/<pid>/status`. */
 std::vector<pid_t> ReadNSpidValues(pid_t pid) {
   const fs::path path = fs::path("/proc") / PidToString(pid) / "status";
   std::istringstream input(ReadTextFile(path));
@@ -273,6 +290,7 @@ std::vector<pid_t> ReadNSpidValues(pid_t pid) {
   return {};
 }
 
+/** @brief Map a restored local pid in a pid namespace back to its host pid. */
 pid_t ResolveHostPidFromLocalPid(pid_t ns_init_host_pid, pid_t local_pid) {
   const auto deadline = std::chrono::steady_clock::now() + kNamespaceRestoreTimeout;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -290,6 +308,7 @@ pid_t ResolveHostPidFromLocalPid(pid_t ns_init_host_pid, pid_t local_pid) {
       "timed out resolving host pid for restored local pid " + PidToString(local_pid));
 }
 
+/** @brief Send a newline-delimited status payload across the namespace status pipe. */
 void WriteStatusPayload(int fd, const std::map<std::string, std::string>& values) {
   const std::string payload = SerializeKeyValueMap(values);
   const char* data = payload.data();
@@ -307,6 +326,7 @@ void WriteStatusPayload(int fd, const std::map<std::string, std::string>& values
   }
 }
 
+/** @brief Read one status payload from the pid-namespace restore helper pipe. */
 std::map<std::string, std::string> ReadStatusPayload(int fd) {
   std::string payload;
   const auto deadline = std::chrono::steady_clock::now() + kNamespaceRestoreTimeout;
@@ -346,6 +366,7 @@ std::map<std::string, std::string> ReadStatusPayload(int fd) {
   return ParseKeyValueText(payload);
 }
 
+/** @brief Re-mount `/proc` inside the private namespace used for pidns restore. */
 void MountNewProc() {
   if (mount(nullptr, "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0) {
     ThrowErrno("mount(/, MS_SLAVE|MS_REC)");
@@ -355,6 +376,13 @@ void MountNewProc() {
   }
 }
 
+/**
+ * @brief Prepare job-control state for restore.
+ *
+ * When the daemon passes a caller tty, the worker duplicates it to stdio,
+ * claims it as the controlling terminal, and makes the restore process group
+ * foreground when the kernel allows that transition.
+ */
 void PrepareControllingTty(int client_tty_fd) {
   auto set_foreground_process_group = [] {
     if (tcsetpgrp(STDIN_FILENO, getpgrp()) != 0) {
@@ -412,6 +440,7 @@ void PrepareControllingTty(int client_tty_fd) {
   }
 }
 
+/** @brief Find the first non-CRIU child under pid 1 after pidns restore completes. */
 pid_t FindRestoredLocalPid(pid_t criu_pid) {
   for (pid_t child_pid : ReadChildPids(1)) {
     if (child_pid != criu_pid) {
@@ -421,6 +450,12 @@ pid_t FindRestoredLocalPid(pid_t criu_pid) {
   return 0;
 }
 
+/**
+ * @brief Run inside pid 1 of the new namespace and report the restored pid out.
+ *
+ * This helper owns the namespace-local restore lifecycle and communicates the
+ * selected restored local pid back to the host-side parent over @p status_fd.
+ */
 int RunNamespaceRestoreInit(const WorkerConfig& config, int status_fd, const fs::path& log_path) {
   bool status_sent = false;
   pid_t criu_pid = 0;
@@ -535,6 +570,7 @@ int RunNamespaceRestoreInit(const WorkerConfig& config, int status_fd, const fs:
   }
 }
 
+/** @brief Orchestrate pid-namespace restore and translate the result back to host state. */
 int RunNamespaceRestore(const WorkerConfig& config) {
   ValidateWorkerConfig(config);
   const fs::path images_dir = config.checkpoint_dir / "images";
@@ -587,6 +623,7 @@ int RunNamespaceRestore(const WorkerConfig& config) {
   return 0;
 }
 
+/** @brief Parse the daemon-owned worker argv into a validated WorkerConfig. */
 WorkerConfig ParseArgs(int argc, char** argv) {
   WorkerConfig config;
   for (int index = 1; index < argc; ++index) {

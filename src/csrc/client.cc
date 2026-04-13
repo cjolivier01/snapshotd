@@ -14,8 +14,15 @@
 
 namespace snapshotd {
 
+/** @brief Bind a client object to one daemon control-socket path. */
 Client::Client(std::string socket_path) : socket_path_(std::move(socket_path)) {}
 
+/**
+ * @brief Send one synchronous control request without ancillary descriptors.
+ *
+ * Each request uses a fresh Unix-domain socket so the CLI does not retain a
+ * long-lived privileged channel between commands.
+ */
 Message Client::Request(const Message& request) const {
   // Each request uses a fresh Unix-domain socket so the CLI never needs to keep
   // a long-lived privileged channel open.
@@ -49,6 +56,12 @@ Message Client::Request(const Message& request) const {
   }
 }
 
+/**
+ * @brief Send one control request together with an optional SCM_RIGHTS fd.
+ *
+ * This is used by restore to pass the caller's controlling terminal to the
+ * daemon and worker without widening the public API to arbitrary fd passing.
+ */
 Message Client::RequestWithFd(const Message& request, int ancillary_fd) const {
   const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {

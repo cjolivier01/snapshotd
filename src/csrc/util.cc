@@ -36,6 +36,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
+/** @brief Parsed identity and capability fields extracted from `/proc/<pid>/status`. */
 struct ProcessStatusFields {
   std::array<uid_t, 4> uids {};
   std::array<gid_t, 4> gids {};
@@ -51,6 +52,13 @@ struct ProcessStatusFields {
   bool have_cap_amb = false;
 };
 
+/**
+ * @brief Ensure a directory exists, creating parents recursively as needed.
+ *
+ * @param path Directory path to create or validate.
+ * @param mode Mode applied to newly created directories.
+ * @param chmod_existing Whether an existing directory should be chmod'd too.
+ */
 void EnsureDirImpl(const fs::path& path, mode_t mode, bool chmod_existing) {
   if (path.empty()) {
     return;
@@ -87,6 +95,7 @@ void EnsureDirImpl(const fs::path& path, mode_t mode, bool chmod_existing) {
   }
 }
 
+/** @brief Write a full string to an fd, retrying on `EINTR`. */
 void WriteAll(int fd, const std::string& text) {
   const char* cursor = text.data();
   std::size_t remaining = text.size();
@@ -103,6 +112,7 @@ void WriteAll(int fd, const std::string& text) {
   }
 }
 
+/** @brief Parse four numeric ids from one `/proc` status line payload. */
 bool ParseFourIds(const std::string& payload, std::array<unsigned long long, 4>* values) {
   std::istringstream input(payload);
   for (std::size_t index = 0; index < values->size(); ++index) {
@@ -113,6 +123,12 @@ bool ParseFourIds(const std::string& payload, std::array<unsigned long long, 4>*
   return true;
 }
 
+/**
+ * @brief Read uid/gid tuples and capability masks from `/proc/<pid>/status`.
+ *
+ * These fields are used to reject processes whose security context no longer
+ * matches the requesting peer.
+ */
 ProcessStatusFields ReadProcessStatusFields(pid_t pid) {
   const fs::path status_path = fs::path("/proc") / PidToString(pid) / "status";
   std::istringstream lines(ReadTextFile(status_path));
@@ -170,6 +186,7 @@ ProcessStatusFields ReadProcessStatusFields(pid_t pid) {
   return fields;
 }
 
+/** @brief Return true when a capability bitmask contains only zero digits. */
 bool IsZeroCapabilityMask(const std::string& value) {
   bool saw_hex_digit = false;
   for (char current : value) {
@@ -184,6 +201,7 @@ bool IsZeroCapabilityMask(const std::string& value) {
   return saw_hex_digit;
 }
 
+/** @brief Verify that all saved, effective, and fs UIDs match the expected uid. */
 bool MatchesExpectedUidTuple(
     const std::array<uid_t, 4>& values,
     uid_t expected_uid) {
@@ -195,6 +213,7 @@ bool MatchesExpectedUidTuple(
   return true;
 }
 
+/** @brief Verify that all saved, effective, and fs GIDs match the expected gid. */
 bool MatchesExpectedGidTuple(
     const std::array<gid_t, 4>& values,
     gid_t expected_gid) {
@@ -206,10 +225,17 @@ bool MatchesExpectedGidTuple(
   return true;
 }
 
+/** @brief Build a stable `/proc/self/fd/<n>` path for xattr and reopen checks. */
 std::string ProcFdPath(int fd) {
   return (fs::path("/proc/self/fd") / std::to_string(fd)).string();
 }
 
+/**
+ * @brief Reject non-regular, setuid, setgid, or file-capability executables.
+ *
+ * Managed jobs must not begin from binaries that can acquire privilege through
+ * file metadata after the daemon drops to the caller's uid/gid.
+ */
 void ValidateManagedExecutableFd(int fd, const std::string& path) {
   struct stat executable_stat {};
   if (fstat(fd, &executable_stat) != 0) {
@@ -238,6 +264,7 @@ void ValidateManagedExecutableFd(int fd, const std::string& path) {
   ThrowErrno("getxattr(" + path + ", security.capability)");
 }
 
+/** @brief Detect shebang scripts so exec helpers can preserve the executable fd. */
 bool ExecutableFdLooksLikeScript(int fd) {
   // Shebang scripts need the executable fd to survive execveat() because the
   // kernel passes the script to the interpreter via /dev/fd/N.
@@ -278,6 +305,7 @@ bool ExecutableFdLooksLikeScript(int fd) {
 
 }  // namespace
 
+/** @brief Format the current `errno` value with context text. */
 std::string ErrnoMessage(const std::string& context) {
   return context + ": " + std::string(strerror(errno));
 }
@@ -292,6 +320,7 @@ ErrnoRuntimeError::ErrnoRuntimeError(std::string message, int error_code)
       error_code);
 }
 
+/** @brief Read an entire text file into memory. */
 std::string ReadTextFile(const fs::path& path) {
   std::ifstream input(path);
   if (!input.is_open()) {
@@ -302,6 +331,12 @@ std::string ReadTextFile(const fs::path& path) {
   return buffer.str();
 }
 
+/**
+ * @brief Write a text file atomically enough for repo metadata use.
+ *
+ * Parent directories are created first with @p parent_mode so private state
+ * does not need to rely on the caller's umask.
+ */
 void WriteTextFile(
     const fs::path& path,
     const std::string& text,
@@ -330,6 +365,7 @@ void EnsureDir(const fs::path& path, mode_t mode) {
   EnsureDirImpl(path, mode, true);
 }
 
+/** @brief Recursively remove one filesystem subtree. */
 void RemoveTree(const fs::path& path) {
   std::error_code error;
   fs::remove_all(path, error);
@@ -347,6 +383,7 @@ std::string GetEnv(const std::string& name, const std::string& default_value) {
   return std::string(value);
 }
 
+/** @brief Return the current working directory as an absolute path string. */
 std::string GetCurrentWorkingDirectory() {
   std::vector<char> buffer(PATH_MAX, '\0');
   if (getcwd(buffer.data(), buffer.size()) == nullptr) {
@@ -355,6 +392,7 @@ std::string GetCurrentWorkingDirectory() {
   return std::string(buffer.data());
 }
 
+/** @brief Validate the restricted identifier format used for job and checkpoint ids. */
 bool IsSafeId(const std::string& value) {
   if (value.empty() || value.size() > 80) {
     return false;
@@ -371,12 +409,14 @@ bool IsSafeId(const std::string& value) {
   return true;
 }
 
+/** @brief Throw when a job or checkpoint identifier violates the safe-id rules. */
 void RequireSafeId(const std::string& value, const std::string& field_name) {
   if (!IsSafeId(value)) {
     throw std::runtime_error("unsafe " + field_name + ": " + value);
   }
 }
 
+/** @brief Generate a short broker-owned identifier with a fixed safe prefix. */
 std::string GenerateId(const std::string& prefix) {
   RequireSafeId(prefix, "prefix");
   std::random_device device;
@@ -389,10 +429,17 @@ std::string GenerateId(const std::string& prefix) {
   return stream.str();
 }
 
+/** @brief Return true when a path string is syntactically absolute. */
 bool IsAbsolutePath(const std::string& path) {
   return !path.empty() && path[0] == '/';
 }
 
+/**
+ * @brief Resolve an executable path the same way the CLI does before brokering.
+ *
+ * Absolute paths are canonicalized directly; bare command names are resolved
+ * against the supplied PATH string.
+ */
 std::string ResolveExecutable(const std::string& executable, const std::string& path_env) {
   if (executable.empty()) {
     throw std::runtime_error("missing executable");
@@ -436,11 +483,13 @@ std::string ResolveExecutable(const std::string& executable, const std::string& 
   throw std::runtime_error("could not resolve executable on PATH: " + executable);
 }
 
+/** @brief Best-effort existence check that suppresses filesystem exceptions. */
 bool PathExists(const fs::path& path) {
   std::error_code error;
   return fs::exists(path, error);
 }
 
+/** @brief Return true when @p candidate stays under @p root after canonicalization. */
 bool IsPathBeneath(const fs::path& root, const fs::path& candidate) {
   std::error_code root_error;
   std::error_code candidate_error;
@@ -461,6 +510,7 @@ bool IsPathBeneath(const fs::path& root, const fs::path& candidate) {
   return root_it == canonical_root.end();
 }
 
+/** @brief Parse `key=value` lines into a simple map. */
 std::map<std::string, std::string> ParseKeyValueText(const std::string& text) {
   std::map<std::string, std::string> values;
   std::istringstream lines(text);
@@ -478,6 +528,7 @@ std::map<std::string, std::string> ParseKeyValueText(const std::string& text) {
   return values;
 }
 
+/** @brief Serialize a map to deterministic newline-delimited `key=value` text. */
 std::string SerializeKeyValueMap(const std::map<std::string, std::string>& values) {
   std::ostringstream output;
   for (const auto& [key, value] : values) {
@@ -490,6 +541,7 @@ std::string SerializeKeyValueMap(const std::map<std::string, std::string>& value
   return output.str();
 }
 
+/** @brief Read one symlink target, usually from `/proc`. */
 std::string ReadSymlinkPath(const fs::path& path) {
   std::vector<char> buffer(PATH_MAX + 1, '\0');
   const ssize_t count = readlink(path.c_str(), buffer.data(), buffer.size() - 1);
@@ -500,6 +552,7 @@ std::string ReadSymlinkPath(const fs::path& path) {
   return std::string(buffer.data());
 }
 
+/** @brief Render an argv vector as a shell-safe single-line string. */
 std::string JoinCommandLine(const std::vector<std::string>& argv) {
   std::ostringstream output;
   bool first = true;

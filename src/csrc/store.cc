@@ -24,11 +24,13 @@ namespace fs = std::filesystem;
 
 namespace {
 
+/** @brief Return the current wall-clock timestamp serialized in epoch seconds. */
 std::string CurrentTimestamp() {
   const std::time_t now = std::time(nullptr);
   return std::to_string(static_cast<long long>(now));
 }
 
+/** @brief Rehydrate one persisted job metadata map into a typed record. */
 JobRecord ParseJobRecord(const std::map<std::string, std::string>& data) {
   JobRecord record;
   record.job_id = data.at("job_id");
@@ -51,6 +53,7 @@ JobRecord ParseJobRecord(const std::map<std::string, std::string>& data) {
   return record;
 }
 
+/** @brief Rehydrate one persisted checkpoint metadata map into a typed record. */
 CheckpointRecord ParseCheckpointRecord(const std::map<std::string, std::string>& data) {
   CheckpointRecord record;
   record.checkpoint_id = data.at("checkpoint_id");
@@ -80,6 +83,7 @@ CheckpointRecord ParseCheckpointRecord(const std::map<std::string, std::string>&
 
 }  // namespace
 
+/** @brief Point a Store instance at the root of broker-owned state. */
 Store::Store(fs::path state_root) : state_root_(std::move(state_root)) {}
 
 void Store::Initialize() const {

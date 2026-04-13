@@ -1,3 +1,12 @@
+/** @file
+ *  @brief Unit coverage for control-message framing, store persistence, and retention.
+ *
+ *  @details
+ *  These tests concentrate on the broker's non-CRIU foundations: control
+ *  protocol safety, metadata persistence, permission boundaries, and retention
+ *  pruning decisions.
+ */
+
 #include <fcntl.h>
 #include <pty.h>
 #include <sys/socket.h>
@@ -23,12 +32,14 @@ namespace fs = std::filesystem;
 
 namespace {
 
+/** @brief Minimal assertion helper that throws with a readable failure message. */
 void Expect(bool condition, const std::string& message) {
   if (!condition) {
     throw std::runtime_error(message);
   }
 }
 
+/** @brief Assert that a callable throws, for negative-path validation tests. */
 void ExpectThrows(const std::function<void()>& fn, const std::string& label) {
   bool threw = false;
   try {
@@ -39,18 +50,21 @@ void ExpectThrows(const std::function<void()>& fn, const std::string& label) {
   Expect(threw, "expected exception for " + label);
 }
 
+/** @brief Verify that broker-owned paths remain private to the owning user. */
 void ExpectNoGroupOrOtherPermissions(const fs::path& path, const std::string& label) {
   const fs::perms perms = fs::status(path).permissions();
   const fs::perms disallowed = fs::perms::group_all | fs::perms::others_all;
   Expect((perms & disallowed) == fs::perms::none, label);
 }
 
+/** @brief Create one unique private temporary directory for a test case. */
 fs::path MakeTempDir(const std::string& prefix) {
   const fs::path path = fs::temp_directory_path() / snapshotd::GenerateId(prefix);
   snapshotd::EnsureDir(path, 0700);
   return path;
 }
 
+/** @brief Verify basic message framing and peer-credential lookup. */
 void TestProtocolRoundTrip() {
   int fds[2] = {-1, -1};
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
@@ -74,6 +88,7 @@ void TestProtocolRoundTrip() {
   close(fds[1]);
 }
 
+/** @brief Ensure request allowlisting rejects unknown control fields. */
 void TestValidateAllowedFieldsRejectsUnknownField() {
   snapshotd::Message request;
   request.command = "restore";
@@ -86,6 +101,7 @@ void TestValidateAllowedFieldsRejectsUnknownField() {
       "unknown request field");
 }
 
+/** @brief Ensure oversized frames are rejected before payload allocation. */
 void TestReceiveMessageRejectsOversizedPayload() {
   int fds[2] = {-1, -1};
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
@@ -105,6 +121,7 @@ void TestReceiveMessageRejectsOversizedPayload() {
   close(fds[1]);
 }
 
+/** @brief Ensure closed peers raise exceptions instead of killing the sender with SIGPIPE. */
 void TestSendMessageClosedPeerThrowsInsteadOfSignaling() {
   int fds[2] = {-1, -1};
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
@@ -137,6 +154,7 @@ void TestSendMessageClosedPeerThrowsInsteadOfSignaling() {
          "SendMessage should throw on a closed peer instead of dying from SIGPIPE");
 }
 
+/** @brief Verify job/checkpoint persistence, path layout, and authorization checks. */
 void TestStoreSaveLoadAndAuthorization() {
   const fs::path temp_dir = MakeTempDir("storetest");
   snapshotd::Store store(temp_dir);
@@ -196,6 +214,7 @@ void TestStoreSaveLoadAndAuthorization() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+/** @brief Verify age-based retention pruning deletes expired checkpoints first. */
 void TestPruneCheckpointsRemovesExpiredEntries() {
   const fs::path temp_dir = MakeTempDir("pruneage");
   snapshotd::Store store(temp_dir);
@@ -241,6 +260,7 @@ void TestPruneCheckpointsRemovesExpiredEntries() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+/** @brief Verify byte-budget pruning prefers colder checkpoints over hot/latest ones. */
 void TestPruneCheckpointsPrefersColdEntriesUnderByteBudget() {
   const fs::path temp_dir = MakeTempDir("prunebudget");
   snapshotd::Store store(temp_dir);
@@ -317,6 +337,7 @@ void TestPruneCheckpointsPrefersColdEntriesUnderByteBudget() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+/** @brief Ensure private parent directory modes stay private after file writes. */
 void TestWriteTextFilePreservesPrivateParentPermissions() {
   const fs::path temp_dir = MakeTempDir("writetext");
   const fs::path private_dir = temp_dir / "private";
@@ -333,6 +354,7 @@ void TestWriteTextFilePreservesPrivateParentPermissions() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+/** @brief Verify the broker's identifier sanitizer rejects traversal-oriented values. */
 void TestSafeIdValidation() {
   Expect(snapshotd::IsSafeId("job-abc123"), "expected safe id");
   Expect(!snapshotd::IsSafeId("../etc/passwd"), "expected path traversal to be unsafe");
@@ -344,6 +366,7 @@ void TestSafeIdValidation() {
 
 // --- SCM_RIGHTS fd-passing tests ---
 
+/** @brief Verify a framed message and attached fd survive a socket round-trip. */
 void TestSendReceiveMessageWithFdRoundTrip() {
   // Verify a message + ancillary fd survive a socketpair roundtrip.
   int fds[2] = {-1, -1};
@@ -386,6 +409,7 @@ void TestSendReceiveMessageWithFdRoundTrip() {
   close(fds[1]);
 }
 
+/** @brief Verify the fd-passing path behaves normally when no fd is attached. */
 void TestSendReceiveMessageWithNoFd() {
   // Sending with ancillary_fd = -1 should behave like a normal message.
   int fds[2] = {-1, -1};
@@ -408,6 +432,7 @@ void TestSendReceiveMessageWithNoFd() {
   close(fds[1]);
 }
 
+/** @brief Verify PTY descriptors remain TTYs after SCM_RIGHTS duplication. */
 void TestSendMessageWithFdToPty() {
   // Verify that a PTY fd can be sent and the receiver sees it as a tty.
   int fds[2] = {-1, -1};
@@ -444,6 +469,7 @@ void TestSendMessageWithFdToPty() {
   close(fds[1]);
 }
 
+/** @brief Verify oversized fd-bearing frames are rejected and cleaned up safely. */
 void TestReceiveMessageWithFdRejectsOversized() {
   // Oversized messages with an attached fd should close the fd and throw.
   int fds[2] = {-1, -1};
@@ -496,6 +522,7 @@ void TestReceiveMessageWithFdRejectsOversized() {
   close(fds[1]);
 }
 
+/** @brief Verify fd passing still works when the message spans multiple sendmsg calls. */
 void TestFdPassingWithLargeMessage() {
   // Verify fd passing works with a message that requires multiple sendmsg/recvmsg calls.
   int fds[2] = {-1, -1};

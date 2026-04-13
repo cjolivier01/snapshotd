@@ -1,0 +1,528 @@
+snapshotd prompt pack
+=====================
+
+Purpose
+-------
+This file is a reusable prompt library for recreating `snapshotd` from scratch,
+or for asking a stronger future model to build a more robust successor while
+preserving the same external contract and security boundary.
+
+How to use this file
+--------------------
+1. Use "PROMPT 00" for a one-shot build in an empty repo if the model is strong enough.
+2. Use "PROMPT 01" through "PROMPT 10" sequentially if you want a staged build.
+3. Use "PROMPT 90" or later if you already have a working implementation and want a stronger model to improve it.
+4. Edit these prompts manually over time as the package evolves.
+
+Product name
+------------
+`snapshotd`
+
+Core product summary
+--------------------
+Build a small privileged CRIU broker for Linux systems that need checkpoint and
+restore without granting users direct `sudo criu` access.
+
+Public binaries and package outputs
+-----------------------------------
+- `/usr/bin/snapshotctl`
+- `/usr/libexec/snapshotd/snapshotd`
+- `/usr/libexec/snapshotd/snapshot-worker`
+- `/etc/snapshotd/snapshotd.conf`
+- `snapshotd.service`
+- `snapshotd.socket`
+- a Debian package named `snapshotd_0.1.0_amd64.deb`
+
+Non-negotiable security invariants
+----------------------------------
+- Users must never receive a raw privileged CRIU command surface.
+- The daemon must authenticate callers with `SO_PEERCRED`, not request-provided UID/PID fields.
+- The daemon must expose a narrow allowlisted API, not a raw JSON or shell tunnel.
+- The authoritative checkpoint state must remain broker-owned under `/var/lib/snapshotd`.
+- Restore must consume only broker-owned checkpoint state, not user-editable exported copies.
+- The worker must clear the environment and force `--no-default-config`.
+- The broker must not expose raw CRIU config paths, raw image paths, or raw work-dir control to users.
+- Managed jobs must be referenced by broker-generated `job_id`, not by arbitrary host PID.
+- Any direct PID bridge must still be peer-owned and security-validated.
+- Managed jobs must be launched as the caller and must reject setuid, setgid, and file-capability executables.
+- PID reuse must be mitigated by storing and revalidating process start time.
+- Security validation must reject targets whose uid/gid tuples drift from the caller or that hold Linux capabilities.
+- The Debian package must not depend on a distro `criu` package.
+- The runtime must prefer `/usr/local/sbin/criu` and `/usr/local/sbin/criu-ns`.
+- Package install should fail if those binaries are missing or not executable.
+
+Desired repo layout
+-------------------
+- `src/csrc/`
+- `tests/csrc/`
+- `packaging/`
+- `docs/`
+- `README.md`
+- top-level `BUILD.bazel`
+- top-level `Makefile`
+
+Expected implementation scope
+-----------------------------
+- C++17
+- Bazel build
+- Unix-domain socket control plane
+- root daemon
+- short-lived privileged worker
+- unprivileged CLI client
+- authoritative root-owned checkpoint store
+- user-readable exported artifacts
+- retention and pruning
+- Debian packaging with systemd socket activation
+- generated docs with Doxygen, plus fallback docs generation using `clang-doc` and `mkdocs`
+
+Public CLI semantics
+--------------------
+The public CLI should support:
+- `run`
+- `status`
+- `checkpoint`
+- `restore`
+
+The internal protocol may also support:
+- `checkpoint-pid`
+
+Prompt style conventions
+------------------------
+When these prompts say "implement", the model should write code, tests, docs,
+and build/package files, not just describe a plan. Every stage should leave the
+repo in a passing state before moving on.
+
+Documentation conventions
+-------------------------
+- Add or preserve extensive Doxygen comments throughout the C/C++ headers and implementation files.
+- When a file, class, struct, helper, or public function lacks Doxygen coverage, add it instead of leaving undocumented gaps.
+- Keep design docs and Doxygen docs cross-referenced where practical so IT reviewers can move easily between prose and source.
+
+PROMPT 00: One-shot full build
+------------------------------
+Create a complete Linux package named `snapshotd` from scratch.
+
+It must be a small privileged CRIU broker with narrow privilege separation:
+- `snapshotctl` is an unprivileged client CLI
+- `snapshotd` is a root daemon behind a Unix socket
+- `snapshot-worker` is a short-lived privileged helper that invokes CRIU with a fixed allowlist
+
+Implement it in C++17 with Bazel. Build the repo layout below:
+- `src/csrc/`
+- `tests/csrc/`
+- `packaging/`
+- `docs/`
+- `README.md`
+- top-level `BUILD.bazel`
+- top-level `Makefile`
+
+Requirements:
+- Use `SO_PEERCRED` for caller authentication.
+- Expose only a small allowlisted key/value protocol.
+- Support `run`, `status`, `checkpoint`, and `restore` in `snapshotctl`.
+- Optionally support an internal `checkpoint-pid` request for peer-owned self-checkpoint flows.
+- Managed jobs must be referenced by generated `job_id`.
+- Persist root-owned job and checkpoint metadata under `/var/lib/snapshotd`.
+- Keep authoritative checkpoint state separate from user-readable exports.
+- Revalidate PID plus start-time before privileged operations.
+- Reject targets with elevated uid/gid tuples or Linux capabilities.
+- Reject managed executables that are setuid, setgid, or file-capability binaries.
+- The worker must scrub the environment and force `--no-default-config`.
+- Do not expose raw CRIU argv, raw image paths, raw work-dir paths, or raw CRIU config loading.
+- Support host restore and pid-namespace dump/restore flows.
+- For restore, support optional TTY passing via SCM_RIGHTS so the restored process can inherit the caller terminal.
+- Enforce worker timeouts and ensure timed-out restore subtrees are actually terminated.
+- Implement retention controls:
+  - `max_checkpoint_age_seconds`
+  - `min_keep_checkpoints_per_job`
+  - `max_keep_checkpoints_per_job`
+  - `max_bytes_per_user`
+  - `max_bytes_total`
+- Add Debian packaging and systemd socket activation.
+- Package install must fail if `/usr/local/sbin/criu` or `/usr/local/sbin/criu-ns` is missing or not executable.
+- Add a top-level `Makefile` with `debug`, `release`, `deb`, `docs`, `install`, `clean`, and `distclean`.
+- `make deb` must copy the `.deb` to the repo root.
+- `make docs` must generate docs under `build/docs/site`, preferring Doxygen and falling back to `clang-doc` + `mkdocs` if Doxygen is unavailable.
+- Add extensive Doxygen comments in the public headers and cross-reference design docs to source docs and vice versa where practical.
+- Add an IT-facing design/review doc that draws explicit parallels to Docker and Podman privilege boundaries and discusses CRIU/CUDA checkpoint context using official sources.
+- Add tests:
+  - protocol/store unit tests
+  - daemon integration test covering happy path and malicious inputs
+  - docs tooling smoke test
+- Add a concise but complete README describing architecture, build, test, docs, install, package contents, and security model.
+
+Deliver a repo that passes:
+- `bazel test //tests/csrc:protocol_store_test //tests/csrc:daemon_integration_test`
+- `bazel test //tests/csrc:docs_tooling_test`
+
+PROMPT 01: Scaffold the repo
+----------------------------
+Create the initial `snapshotd` repo skeleton in C++17 with Bazel.
+
+Goals:
+- top-level `BUILD.bazel`
+- top-level `Makefile`
+- `src/csrc/`
+- `tests/csrc/`
+- `packaging/`
+- `docs/`
+- `README.md`
+
+The Makefile must define:
+- `debug`
+- `release`
+- `deb`
+- `docs`
+- `install`
+- `clean`
+- `distclean`
+
+The build must produce:
+- `snapshotctl`
+- `snapshotd`
+- `snapshot-worker`
+- `snapshotd_0.1.0_amd64.deb`
+
+Keep dependencies minimal. Use standard C++ and shell tooling only unless there is a strong reason not to.
+Add Doxygen file comments from the start so later stages extend a documented codebase instead of backfilling it.
+
+PROMPT 02: Implement the control protocol and client
+----------------------------------------------------
+Implement the control plane for `snapshotd`.
+
+Requirements:
+- Unix-domain socket protocol
+- framed key/value messages, not JSON
+- explicit maximum message size
+- repeated fields support
+- request-field allowlisting
+- peer credential helper using `SO_PEERCRED`
+- `snapshotctl` client library and CLI
+- optional SCM_RIGHTS FD passing for restore TTY handoff
+
+CLI behavior:
+- `snapshotctl run -- /absolute/command args...`
+- `snapshotctl status <job-id>`
+- `snapshotctl checkpoint <job-id>`
+- `snapshotctl restore [--namespace-restore] <job-id> [checkpoint-id]`
+
+Output format should be deterministic `key=value` lines suitable for shell parsing.
+Add Doxygen comments for the wire format, message helpers, client flow, and CLI parsing helpers.
+
+PROMPT 03: Implement the daemon trust boundary
+----------------------------------------------
+Implement the privileged daemon and persistent metadata store.
+
+Requirements:
+- authenticate callers with `SO_PEERCRED`
+- reject unknown request fields
+- persist job and checkpoint metadata
+- map callers to managed jobs owned by caller UID
+- support `run`, `status`, `checkpoint`, `restore`
+- optionally support internal `checkpoint-pid`
+- enforce process identity checks using PID plus start time
+- revalidate uid/gid tuples and Linux capabilities
+- update job state to reflect running, stale, unsafe, or exited
+- adopt the restored PID after successful restore
+
+State layout:
+- authoritative private state under `/var/lib/snapshotd/<uid>/jobs/...`
+- user-readable read-only exports under `/var/lib/snapshotd/<uid>/exports/...`
+
+The daemon must own policy. The client must remain thin.
+Document the trust boundary, validation flow, and persistence layout with Doxygen comments in the implementation as well as headers.
+
+PROMPT 04: Implement the worker and CRIU invocation rules
+---------------------------------------------------------
+Implement `snapshot-worker` as a short-lived privileged helper.
+
+Requirements:
+- no public socket
+- no user-facing CLI semantics beyond daemon-owned flags
+- construct fixed CRIU dump/restore commands
+- clear environment
+- set minimal deterministic env vars only
+- force `--no-default-config`
+- keep paths absolute and broker-owned
+- allow only a very small allowlisted set of extra CRIU args
+- support host dump/restore
+- support pid-namespace dump/restore using `/usr/local/sbin/criu-ns`
+- implement path-confinement checks so worker-owned paths remain beneath the daemon state root
+
+Do not allow the worker to become a generic CRIU wrapper.
+Document the privileged helper path, CRIU argv allowlist, tty/job-control behavior, and namespace restore flow with Doxygen comments.
+
+PROMPT 05: Add restore TTY handoff and job-control behavior
+-----------------------------------------------------------
+Extend restore so the caller terminal can be handed through safely.
+
+Requirements:
+- `snapshotctl restore` should try to open `/dev/tty`
+- send that FD to the daemon via SCM_RIGHTS when available
+- daemon passes the FD to the worker for restore only
+- worker duplicates it onto stdin/stdout/stderr before host restore
+- worker should attempt to claim the controlling TTY and foreground process group when possible
+- behavior should degrade safely when the environment does not permit TTY takeover
+- timeout handling must still terminate detached restore subtrees
+
+Tests must cover:
+- end-to-end FD passing
+- restore wrapper tty state
+- adopted restored PID tty state
+- restore timeout cleanup
+
+PROMPT 06: Implement retention, cleanup, and exports
+----------------------------------------------------
+Implement checkpoint retention and export behavior.
+
+Requirements:
+- authoritative checkpoints stay under private broker-owned state
+- exports are read-only broker-owned copies for diagnostics and compatibility
+- restore always uses private authoritative state, never exports
+- persist checkpoint metadata:
+  - `created_at`
+  - `last_restored_at`
+  - `restore_count`
+  - `size_bytes`
+  - `job_id`
+  - `checkpoint_id`
+- implement pruning knobs:
+  - `max_checkpoint_age_seconds`
+  - `min_keep_checkpoints_per_job`
+  - `max_keep_checkpoints_per_job`
+  - `max_bytes_per_user`
+  - `max_bytes_total`
+
+Eviction policy:
+- preserve the current checkpoint and the latest checkpoint floor
+- preserve enough newest checkpoints to satisfy the minimum keep count
+- prune by age
+- prune by max-per-job
+- if still over budget, evict least valuable checkpoints using oldest restore use first, then lowest restore count, then larger/older checkpoints
+
+PROMPT 07: Write the test suite
+-------------------------------
+Write a test suite that proves the security boundary and core workflows.
+
+Required tests:
+- `protocol_store_test`
+  - framing
+  - size limits
+  - repeated fields
+  - store persistence
+  - SCM_RIGHTS send/receive with and without FD
+- `daemon_integration_test`
+  - `run`
+  - `status`
+  - `checkpoint`
+  - `restore`
+  - malicious field rejection
+  - path traversal rejection
+  - setuid executable rejection
+  - response-write disconnect tolerance
+  - worker timeout on dump
+  - worker timeout on restore
+  - restore TTY and restored PID inheritance checks
+  - retention pruning smoke coverage
+- `docs_tooling_test`
+  - `make docs` in auto mode
+  - Doxygen path if Doxygen is present
+  - `clang-doc` + `mkdocs` fallback if both are present
+
+Use fake CRIU helpers in tests so the suite is hermetic.
+
+PROMPT 08: Build Debian packaging and systemd integration
+---------------------------------------------------------
+Create Debian packaging for `snapshotd`.
+
+Requirements:
+- package name: `snapshotd`
+- version: `0.1.0`
+- architecture: `amd64`
+- install paths:
+  - `/usr/bin/snapshotctl`
+  - `/usr/libexec/snapshotd/snapshotd`
+  - `/usr/libexec/snapshotd/snapshot-worker`
+  - `/etc/snapshotd/snapshotd.conf`
+  - `/lib/systemd/system/snapshotd.service`
+  - `/lib/systemd/system/snapshotd.socket`
+  - `/usr/lib/tmpfiles.d/snapshotd.conf`
+  - `/usr/share/doc/snapshotd/README.Debian`
+- package install must fail if `/usr/local/sbin/criu` or `/usr/local/sbin/criu-ns` is missing or not executable
+- create `snapshot-users` system group if needed
+- create `/var/lib/snapshotd`
+- enable and start `snapshotd.socket`
+- keep socket policy in systemd socket unit rather than daemon config
+- do not depend on a distro `criu` package
+
+Also add:
+- `make deb`
+- `.gitignore` coverage for generated `.deb`
+
+PROMPT 09: Add docs and cross-references
+----------------------------------------
+Create maintainable docs for both developers and IT/security reviewers.
+
+Requirements:
+- Doxygen config under `docs/Doxyfile`
+- Doxygen main page
+- Doxygen IT review page
+- Doxygen design-reference page
+- extensive Doxygen comments in public headers
+- cross-reference design docs to source docs and source docs back to design docs where practical
+- `make docs` target writing to `build/docs/site`
+- `docs/generate_docs.sh`
+- fallback docs path using `clang-doc` + `mkdocs`
+- fallback pages mirroring the main pages:
+  - index
+  - it-review-guide
+  - design-reference
+
+Docs content must explain:
+- why this exists
+- why `sudo criu` is the wrong boundary
+- how the daemon/worker split narrows privilege
+- why managed jobs are safer than arbitrary PID checkpointing
+- why restore must use broker-owned checkpoint state
+- how retention works
+
+PROMPT 10: Write the README and final polish pass
+-------------------------------------------------
+Write a README that makes the package easy to understand and audit.
+
+It must cover:
+- high-level architecture
+- why it exists
+- repo layout
+- prerequisites
+- build commands
+- `make` targets
+- test commands
+- docs commands
+- install and uninstall
+- packaged files
+- config file settings
+- socket group model
+- state layout
+- retention controls
+- smoke-test examples
+
+Then perform a final polish pass:
+- improve naming consistency
+- reduce accidental complexity
+- ensure the CLI is deterministic
+- ensure the worker remains non-generic
+- ensure tests and docs match the implementation
+
+PROMPT 20: Rebuild from scratch, preserving behavior but allowing better internals
+----------------------------------------------------------------------------------
+Recreate `snapshotd` from scratch, preserving the same external behavior and
+security guarantees, but feel free to improve the internal implementation if it
+makes the system more robust, testable, or auditable.
+
+Preserve:
+- binary names
+- package name
+- systemd/socket model
+- daemon config model
+- managed-job semantics
+- authoritative state under `/var/lib/snapshotd`
+- read-only export copies
+- worker timeout behavior
+- docs target behavior
+- test target names
+
+You may improve:
+- internal code structure
+- helper abstractions
+- error messages
+- test coverage
+- documentation clarity
+- retention implementation quality
+- restore subtree shutdown behavior
+
+PROMPT 21: Stronger-model hardening pass
+----------------------------------------
+Assume a stronger model than the one that created the current repo. Improve the
+implementation while preserving the public interface and package layout.
+
+Focus on:
+- security review of request parsing
+- stronger process identity validation
+- more rigorous timeout and signal handling
+- restore subtree cleanup correctness
+- race-condition resistance
+- packaging/install robustness
+- clearer docs and stronger Doxygen coverage
+- more hermetic tests
+- easier-to-audit code paths
+
+Do not widen the privileged API. Do not turn the worker into a general CRIU wrapper.
+
+PROMPT 22: IT/security review document refresh
+----------------------------------------------
+Refresh the IT/security-facing docs for `snapshotd`.
+
+Requirements:
+- explain the privilege boundary in plain language
+- draw explicit parallels to Docker and Podman managed-runtime patterns
+- explain why this package manages broker-owned jobs instead of exposing arbitrary PID checkpoint as root
+- explain how CUDA checkpoint context changes the environment but not the need for a narrow root boundary
+- use official Docker, Podman, NVIDIA, and CRIU sources when citing external behavior
+- if official Docker or Podman design docs about CUDA checkpoint root usage do not exist, state that clearly instead of inventing them
+
+PROMPT 30: Final reviewer prompt
+--------------------------------
+Review the `snapshotd` repo as if you are doing a high-signal code review on a
+security-sensitive systems package.
+
+Focus on:
+- bugs
+- behavioral regressions
+- privilege-boundary mistakes
+- PID reuse or stale-identity holes
+- dangerous CRIU surface re-exposure
+- packaging/install footguns
+- missing docs/test coverage
+
+Findings should be ordered by severity and reference concrete files and lines.
+If there are no findings, say so explicitly and name any residual risks.
+
+PROMPT 90: Better-version successor prompt
+------------------------------------------
+Build a strictly better successor to `snapshotd`.
+
+Keep the same product goal and narrow privilege model, but improve robustness
+where possible:
+- cleaner internal architecture
+- stronger lifecycle/state machine validation
+- more explicit error taxonomy
+- clearer separation of authoritative state vs exports
+- tighter worker timeout and cancellation semantics
+- better docs and cross-linking
+- more exhaustive tests
+- better Debian installer ergonomics
+
+Non-negotiable constraints:
+- no raw CRIU argv tunnel
+- no user-controlled privileged image/work/config paths
+- no weakening of the current socket/daemon/worker trust boundary
+- no reliance on a distro CRIU package
+- preserve the packaged binary names and top-level operational workflow unless there is a very strong reason to version a breaking change
+
+PROMPT 99: Expected acceptance checklist
+----------------------------------------
+Do not call the package done until all of these are true:
+- Bazel builds the binaries and Debian package
+- `make deb` copies the package to the repo root
+- `make docs` generates `build/docs/site/index.html`
+- docs prefer Doxygen and fall back to `clang-doc` + `mkdocs`
+- public headers carry useful Doxygen comments
+- design docs cross-reference the code docs
+- packaged install checks `/usr/local/sbin/criu` and `/usr/local/sbin/criu-ns`
+- tests pass:
+  - `bazel test //tests/csrc:protocol_store_test //tests/csrc:daemon_integration_test`
+  - `bazel test //tests/csrc:docs_tooling_test`
+- the README matches the implementation
+- the worker still has a narrow fixed command surface
+- the daemon still owns all policy decisions
