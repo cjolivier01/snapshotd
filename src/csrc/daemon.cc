@@ -47,6 +47,7 @@ namespace {
 
 std::atomic<bool> g_terminate(false);
 
+/** @brief Convert SIGINT/SIGTERM into a cooperative daemon shutdown request. */
 void SignalHandler(int) {
   g_terminate.store(true);
 }
@@ -213,6 +214,7 @@ int CreateSocket(const std::string& socket_path) {
   return fd;
 }
 
+/** @brief Convert a string vector into the mutable argv form required by `execveat`/`execve`. */
 std::vector<char*> MakeArgv(const std::vector<std::string>& argv_storage) {
   std::vector<char*> argv;
   argv.reserve(argv_storage.size() + 1);
@@ -223,6 +225,7 @@ std::vector<char*> MakeArgv(const std::vector<std::string>& argv_storage) {
   return argv;
 }
 
+/** @brief Convert environment strings into the mutable envp form required by `execveat`/`execve`. */
 std::vector<char*> MakeEnvp(const std::vector<std::string>& env_storage) {
   std::vector<char*> envp;
   envp.reserve(env_storage.size() + 1);
@@ -233,11 +236,13 @@ std::vector<char*> MakeEnvp(const std::vector<std::string>& env_storage) {
   return envp;
 }
 
+/** @brief Result of launching a managed unprivileged process under the daemon. */
 struct LaunchResult {
   pid_t pid = 0;
   std::string start_time_ticks;
 };
 
+/** @brief Child-side launch milestones used for precise error reporting. */
 enum class LaunchStage {
   kInitGroups = 1,
   kSetGid = 2,
@@ -248,11 +253,13 @@ enum class LaunchStage {
   kExecve = 7,
 };
 
+/** @brief Small payload sent over the error pipe when managed-job launch fails. */
 struct LaunchFailure {
   int stage = 0;
   int error_code = 0;
 };
 
+/** @brief Exception type for user-visible request validation failures. */
 class RequestError : public std::runtime_error {
  public:
   RequestError(std::string code, std::string message)
@@ -270,6 +277,7 @@ class RequestError : public std::runtime_error {
   std::vector<std::pair<std::string, std::string>> fields_;
 };
 
+/** @brief Mark one fd `FD_CLOEXEC` so managed jobs do not inherit broker state. */
 void SetCloseOnExec(int fd) {
   const int flags = fcntl(fd, F_GETFD);
   if (flags < 0) {
@@ -280,12 +288,14 @@ void SetCloseOnExec(int fd) {
   }
 }
 
+/** @brief Treat common disconnect races as harmless while sending responses. */
 bool IsBenignResponseWriteError(const ErrnoRuntimeError& error) {
   return error.error_code() == EPIPE ||
          error.error_code() == ECONNRESET ||
          error.error_code() == ENOTCONN;
 }
 
+/** @brief Send a response unless the client has already disconnected. */
 void TrySendResponse(int client_fd, const Message& response) {
   try {
     SendMessage(client_fd, response);
@@ -301,6 +311,13 @@ void TrySendResponse(int client_fd, const Message& response) {
   }
 }
 
+/**
+ * @brief Launch a managed process as the calling peer and record its identity.
+ *
+ * The daemon validates the executable before dropping privileges, then persists
+ * the child's pid and start-time token so later checkpoint requests can detect
+ * PID reuse.
+ */
 LaunchResult LaunchManagedJob(
     const PeerCred& peer,
     const std::vector<std::string>& argv,
@@ -450,16 +467,19 @@ LaunchResult LaunchManagedJob(
   return {child, start_time_ticks};
 }
 
+/** @brief Convert a `criu` path into the default sibling `criu-ns` path. */
 std::string DefaultCriuNsPath(const std::string& criu_bin) {
   const fs::path path(criu_bin);
   return (path.parent_path() / "criu-ns").string();
 }
 
+/** @brief Interpret common protocol truthy values such as `1` and `true`. */
 bool MessageFlagEnabled(const Message& request, const std::string& key) {
   const std::string value = request.Get(key);
   return value == "1" || value == "true" || value == "yes";
 }
 
+/** @brief Validate the tiny allowlisted subset of CRIU passthrough flags. */
 std::vector<std::string> ValidateExtraArgs(const std::vector<std::string>& extra_args) {
   std::vector<std::string> validated;
   for (std::size_t index = 0; index < extra_args.size(); ++index) {
@@ -499,6 +519,12 @@ std::vector<std::string> ValidateExtraArgs(const std::vector<std::string>& extra
   return validated;
 }
 
+/**
+ * @brief Register an existing safe peer-owned pid as a managed job.
+ *
+ * This is the intentionally narrow bridge for runtimes that already supervise
+ * the process they want snapshotd to checkpoint.
+ */
 JobRecord CreatePidOwnedJob(Store* store, const PeerCred& peer, pid_t target_pid) {
   if (target_pid <= 1) {
     throw std::runtime_error("checkpoint pid must be > 1");

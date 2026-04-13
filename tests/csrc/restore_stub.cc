@@ -1,3 +1,11 @@
+/** @file
+ *  @brief Tiny restore helper used by integration tests to record tty state.
+ *
+ *  @details
+ *  Fake CRIU restore scripts launch this stub so the test harness can inspect
+ *  the restored process tree's session, process-group, and stdio bindings.
+ */
+
 #include <signal.h>
 #include <unistd.h>
 
@@ -10,11 +18,13 @@
 
 namespace {
 
+/** @brief Print the expected CLI usage for the restore stub harness. */
 int Usage() {
   std::cerr << "usage: restore_stub --pidfile PATH [--tty-log PATH]\n";
   return 2;
 }
 
+/** @brief Read a symlink target or return `"unavailable"` when it cannot be read. */
 std::string ReadSymlinkTarget(const std::string& path) {
   std::array<char, 4096> buffer {};
   const ssize_t count = readlink(path.c_str(), buffer.data(), buffer.size() - 1);
@@ -25,6 +35,7 @@ std::string ReadSymlinkTarget(const std::string& path) {
   return std::string(buffer.data());
 }
 
+/** @brief Persist the process's tty/session state for later integration-test assertions. */
 void WriteTtyStateLog(const std::string& tty_log_path) {
   if (tty_log_path.empty()) {
     return;
@@ -66,6 +77,7 @@ void WriteTtyStateLog(const std::string& tty_log_path) {
 
 }  // namespace
 
+/** @brief Fork a long-lived child, log its tty state, and write its pid to a pidfile. */
 int main(int argc, char** argv) {
   std::string pidfile_path;
   std::string tty_log_path;

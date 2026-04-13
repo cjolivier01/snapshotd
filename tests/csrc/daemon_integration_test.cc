@@ -1,3 +1,12 @@
+/** @file
+ *  @brief End-to-end integration tests for the privileged daemon and worker flow.
+ *
+ *  @details
+ *  The harness launches the real daemon and CLI against fake CRIU wrappers so
+ *  it can validate privilege boundaries, metadata behavior, TTY handoff, and
+ *  timeout cleanup without requiring a real CRIU install in test.
+ */
+
 #include <pty.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -31,12 +40,14 @@ namespace fs = std::filesystem;
 
 namespace {
 
+/** @brief Captured stdout/stderr and exit status for a helper subprocess. */
 struct CommandResult {
   int exit_code = 0;
   std::string stdout_text;
   std::string stderr_text;
 };
 
+/** @brief Command result variant that also records the caller's PTY context. */
 struct TtyCommandResult {
   int exit_code = 0;
   std::string output_text;
@@ -44,6 +55,7 @@ struct TtyCommandResult {
   std::string tty_path;
 };
 
+/** @brief Small subset of `/proc/<pid>/stat` fields relevant to job control. */
 struct ProcStatFields {
   std::string pgrp;
   std::string sid;
@@ -51,14 +63,17 @@ struct ProcStatFields {
   std::string tpgid;
 };
 
+/** @brief Read the job-control subset of `/proc/<pid>/stat` for one process. */
 ProcStatFields ReadProcStatFields(pid_t pid);
 
+/** @brief Throwing assertion helper for this standalone integration binary. */
 void Expect(bool condition, const std::string& message) {
   if (!condition) {
     throw std::runtime_error(message);
   }
 }
 
+/** @brief Resolve one Bazel runfile path used by the integration harness. */
 fs::path Runfile(const std::string& relative_path) {
   const char* test_srcdir = getenv("TEST_SRCDIR");
   if (test_srcdir == nullptr) {
@@ -67,12 +82,14 @@ fs::path Runfile(const std::string& relative_path) {
   return fs::path(test_srcdir) / "snapshotd" / relative_path;
 }
 
+/** @brief Create one unique private temporary directory for an integration case. */
 fs::path MakeTempDir(const std::string& prefix) {
   const fs::path path = fs::temp_directory_path() / snapshotd::GenerateId(prefix);
   snapshotd::EnsureDir(path, 0700);
   return path;
 }
 
+/** @brief Write an executable helper script or stub used by the test harness. */
 void WriteExecutable(const fs::path& path, const std::string& text) {
   snapshotd::WriteTextFile(path, text);
   if (chmod(path.c_str(), 0755) != 0) {
@@ -80,6 +97,7 @@ void WriteExecutable(const fs::path& path, const std::string& text) {
   }
 }
 
+/** @brief Parse deterministic `key=value` command output into a map. */
 std::map<std::string, std::string> ParseOutputMap(const std::string& text) {
   std::map<std::string, std::string> values;
   std::istringstream lines(text);
@@ -100,6 +118,7 @@ std::map<std::string, std::string> ParseOutputMap(const std::string& text) {
   return values;
 }
 
+/** @brief Run one subprocess with captured stdout/stderr and optional env overrides. */
 CommandResult RunCommand(
     const std::vector<std::string>& argv,
     const std::map<std::string, std::string>& extra_env = {}) {
@@ -164,6 +183,7 @@ CommandResult RunCommand(
   return result;
 }
 
+/** @brief Run one subprocess under a PTY so restore can exercise TTY handoff. */
 TtyCommandResult RunCommandWithControllingTty(
     const std::vector<std::string>& argv,
     const std::map<std::string, std::string>& extra_env = {}) {
@@ -285,6 +305,7 @@ TtyCommandResult RunCommandWithControllingTty(
   return result;
 }
 
+/** @brief Start the real daemon binary with test-owned socket, state, and CRIU paths. */
 pid_t SpawnDaemon(
     const fs::path& daemon_bin,
     const fs::path& socket_path,
@@ -339,6 +360,7 @@ pid_t SpawnDaemon(
   return child;
 }
 
+/** @brief Send a raw protocol request and disconnect immediately to test daemon resilience. */
 void SendAndClose(const fs::path& socket_path, const snapshotd::Message& request) {
   const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
@@ -361,6 +383,7 @@ void SendAndClose(const fs::path& socket_path, const snapshotd::Message& request
   close(fd);
 }
 
+/** @brief Poll until a path appears or fail after the timeout elapses. */
 void WaitForPath(const fs::path& path, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -372,6 +395,7 @@ void WaitForPath(const fs::path& path, std::chrono::milliseconds timeout) {
   throw std::runtime_error("timed out waiting for " + path.string());
 }
 
+/** @brief Poll until a process exits, for timeout and cleanup assertions. */
 void WaitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -383,6 +407,7 @@ void WaitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) {
   throw std::runtime_error("timed out waiting for pid " + std::to_string(pid) + " to exit");
 }
 
+/** @brief Terminate a child that belongs directly to the test process. */
 void KillAndWait(pid_t pid) {
   if (pid <= 0) {
     return;
@@ -392,6 +417,7 @@ void KillAndWait(pid_t pid) {
   waitpid(pid, &status, 0);
 }
 
+/** @brief Best-effort SIGTERM for managed processes not reaped by this test process. */
 void BestEffortTerminate(pid_t pid) {
   if (pid <= 0) {
     return;
@@ -401,6 +427,7 @@ void BestEffortTerminate(pid_t pid) {
   (void)!kill(pid, SIGTERM);
 }
 
+/** @brief Count descriptors above stdio for leak detection on managed jobs. */
 std::size_t CountNonStandardFds(pid_t pid) {
   const fs::path fd_dir = fs::path("/proc") / std::to_string(pid) / "fd";
   std::size_t count = 0;
@@ -417,12 +444,14 @@ std::size_t CountNonStandardFds(pid_t pid) {
   return count;
 }
 
+/** @brief Read the symlink target for one process fd from `/proc/<pid>/fd/<n>`. */
 std::string DescriptorTarget(pid_t pid, int fd) {
   return fs::read_symlink(fs::path("/proc") / std::to_string(pid) / "fd" /
                           std::to_string(fd))
       .string();
 }
 
+/** @brief Parse the process-group, session, and tty fields from `/proc/<pid>/stat`. */
 ProcStatFields ReadProcStatFields(pid_t pid) {
   std::istringstream input(snapshotd::ReadTextFile(fs::path("/proc") / std::to_string(pid) / "stat"));
   std::string pid_field;
@@ -437,6 +466,7 @@ ProcStatFields ReadProcStatFields(pid_t pid) {
   return fields;
 }
 
+/** @brief Accept either a direct PTY path or `/dev/tty` in a logged tty field. */
 bool LoggedTtyTargetMatches(const std::map<std::string, std::string>& values,
                             const std::string& key,
                             const std::string& tty_path) {
@@ -447,6 +477,7 @@ bool LoggedTtyTargetMatches(const std::map<std::string, std::string>& values,
   return found->second == tty_path || found->second == "/dev/tty";
 }
 
+/** @brief Exercise the main daemon flow plus malicious-input rejection paths. */
 void TestDaemonFlowAndMaliciousInputs() {
   const fs::path temp_dir = MakeTempDir("daemonit");
   const fs::path socket_path = temp_dir / "snapshotd.sock";
@@ -756,6 +787,7 @@ void TestDaemonFlowAndMaliciousInputs() {
   snapshotd::RemoveTree(temp_dir);
 }
 
+/** @brief Verify worker timeout enforcement kills a hung privileged operation. */
 void TestWorkerTimeoutCancelsHungOperation() {
   const fs::path temp_dir = MakeTempDir("timeoutit");
   const fs::path socket_path = temp_dir / "snapshotd.sock";

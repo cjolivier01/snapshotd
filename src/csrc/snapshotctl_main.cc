@@ -25,12 +25,14 @@ namespace {
 using snapshotd::Client;
 using snapshotd::Message;
 
+/** @brief Print the stable CLI usage string for human callers and scripts. */
 void PrintUsage() {
   std::cerr
       << "usage: snapshotctl [--socket-path PATH] <run|status|checkpoint|restore> ...\n"
       << "  restore [--namespace-restore] <job-id> [checkpoint-id]\n";
 }
 
+/** @brief Render a daemon response as deterministic `key=value` lines. */
 void PrintResponse(const Message& response) {
   // The CLI prints a stable key=value format so shell scripts can parse the
   // control-plane responses without needing a JSON dependency.
@@ -39,6 +41,7 @@ void PrintResponse(const Message& response) {
   }
 }
 
+/** @brief Send a request and translate daemon `error` responses into exceptions. */
 Message CheckedRequest(const Client& client, const Message& request) {
   Message response = client.Request(request);
   if (response.command == "error") {
@@ -47,6 +50,7 @@ Message CheckedRequest(const Client& client, const Message& request) {
   return response;
 }
 
+/** @brief Variant of CheckedRequest that optionally includes an ancillary fd. */
 Message CheckedRequest(const Client& client, const Message& request, int ancillary_fd) {
   Message response =
       ancillary_fd >= 0 ? client.RequestWithFd(request, ancillary_fd) : client.Request(request);
@@ -56,6 +60,12 @@ Message CheckedRequest(const Client& client, const Message& request, int ancilla
   return response;
 }
 
+/**
+ * @brief Open the caller's controlling terminal for restore if one exists.
+ *
+ * Non-interactive callers are allowed, so failure to open `/dev/tty` is
+ * intentionally treated as "no tty to pass" rather than a hard error.
+ */
 int OpenControllingTtyForRestore() {
   // Use /dev/tty rather than stdio so restore can still recover the caller's
   // interactive terminal even when stdin/stdout are redirected by a script.
@@ -70,6 +80,7 @@ int OpenControllingTtyForRestore() {
 
 }  // namespace
 
+/** @brief Parse CLI argv, forward the request to the daemon, and print results. */
 int main(int argc, char** argv) {
   try {
     std::string socket_path = "/run/snapshotd.sock";

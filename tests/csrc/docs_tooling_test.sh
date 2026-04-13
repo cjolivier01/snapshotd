@@ -13,6 +13,7 @@ run_docs_check() {
     DOCS_HTML_INDEX="$out_dir/site/index.html" >/dev/null
   test -f "$out_dir/site/index.html"
   grep -qi "snapshotd" "$out_dir/site/index.html"
+  grep -Rqi "daemon_integration_test.cc" "$out_dir/site"
 }
 
 have_doxygen=0
