@@ -332,14 +332,26 @@ broker-controlled images/work/log paths, discovers the restored local PID, and
 resolves that back to the host PID before writing the broker-owned
 `restore.pid`.
 
-The only passthrough CRIU options are a small allowlist needed by the runtime,
-for example:
+The public `snapshotctl` CLI does not expose arbitrary CRIU flags. The broker's
+internal protocol does accept repeated `extra_arg` fields for downstream
+clients, but each token is validated against a small allowlist before it
+reaches the worker.
+
+The current allowlist is:
 
 - `--ghost-limit`
+- `--ghost-limit=<value>`
 - `--link-remap`
 - `--tcp-established`
 - `--tcp-close`
 - `--file-locks`
+- `--external tty[...]`
+- `--inherit-fd fd[...]`
+
+The operand-bearing forms above are still constrained:
+
+- `--external` is accepted only with a following value that starts with `tty[`
+- `--inherit-fd` is accepted only with a following value that starts with `fd[`
 
 Dangerous CRIU surfaces such as `--config`, `--action-script`, `--exec-cmd`,
 arbitrary image/work directories, and environment-driven config loading are not
